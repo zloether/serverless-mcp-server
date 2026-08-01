@@ -27,7 +27,10 @@ See `docs/design-notes.md` for the architecture and the reasoning behind each de
 ├── tests/                  # pytest suite for the Lambda handler
 ├── scripts/build_lambda.sh # Packaging script for Lambdas with a requirements.txt (none needed here yet)
 ├── AGENTS.md               # This file
-├── CLAUDE.md               # Points to this file
+├── CLAUDE.md, GEMINI.md,   # AI-tool instruction files — all point to this one.
+│   .windsurfrules,         # Keep them in sync if this file is renamed/moved.
+│   .cursor/rules/agents.mdc,
+│   .github/copilot-instructions.md
 ├── docs/design-notes.md    # Why this architecture, Claude.ai connector requirements, rate-limiting design
 └── README.md               # Human-facing setup/deploy guide
 ```
