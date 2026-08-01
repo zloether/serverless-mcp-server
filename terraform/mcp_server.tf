@@ -83,11 +83,10 @@ resource "aws_lambda_function" "mcp_server" {
   timeout     = 10
   memory_size = 128
 
-  # Layer 2 (design-notes.md §3.4) — cap parallelism. AWS accounts default to
-  # a 10-unit concurrency floor with no headroom above the unreserved
-  # minimum — request a Service Quotas increase for Lambda "Concurrent
-  # executions" before setting this above 0 if you hit that ceiling.
-  reserved_concurrent_executions = 2
+  # Layer 2 (design-notes.md §3.4) — cap parallelism. Defaults to no
+  # reservation (see var.mcp_lambda_reserved_concurrency) until you request
+  # a concurrency quota increase — see README.md "Lambda concurrency".
+  reserved_concurrent_executions = var.mcp_lambda_reserved_concurrency
 
   environment {
     variables = {

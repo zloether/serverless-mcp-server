@@ -146,13 +146,15 @@ behavior. The same throttle is applied to the unauthenticated discovery
 route, since it has no auth in front of it.
 
 **Layer 2 — Lambda reserved concurrency (parallelism cap)**
-Reserved concurrency = **2** on the MCP Lambda. Requests beyond that are
-throttled (429) instead of executing — a second, independent backstop if
-the API Gateway throttle is ever misconfigured or bypassed, and a hard
-ceiling on cost-per-unit-time regardless of request rate. AWS accounts
-default to a 10-unit concurrency floor with no headroom above the required
-unreserved minimum — request a Service Quotas increase for Lambda
-"Concurrent executions" if `terraform apply` fails to reserve this.
+`var.mcp_lambda_reserved_concurrency` caps concurrent executions on the MCP
+Lambda — requests beyond that are throttled (429) instead of executing, a
+second, independent backstop if the API Gateway throttle is ever
+misconfigured or bypassed, and a hard ceiling on cost-per-unit-time
+regardless of request rate. Defaults to `-1` (no reservation) because most
+AWS accounts start on a 10-unit account-wide concurrency floor with no
+headroom to reserve any amount above 0 — see README.md "Lambda concurrency"
+for requesting a quota increase and setting a real reservation (e.g. `2`)
+once it's approved.
 
 **Layer 3 — Application-level cumulative cap (the actual kill switch)**
 A DynamoDB counter table (`usage-counters`, PK `date#YYYY-MM-DD` and
@@ -204,7 +206,7 @@ endpoint's logs show unexpected unauthenticated traffic.
 | Layer | Mechanism | Default limit | Response to breach | Included here? |
 |---|---|---|---|---|
 | Rate | API Gateway route throttle | 2 req/s, burst 5 | 429, request dropped | Yes |
-| Concurrency | Lambda reserved concurrency | 2 concurrent executions | 429, request throttled | Yes |
+| Concurrency | Lambda reserved concurrency | None by default (`-1`); set after quota increase | 429, request throttled | Yes |
 | Cumulative (app-wide) | DynamoDB counter, checked pre-execution | 200/day, 2,000/month | MCP error, no downstream calls made | Yes |
 | Cumulative (per-provider) | DynamoDB counter, checked pre-provider-call | 50/day per paid provider | MCP error for that tool only | No — add when you add a paid tool |
 | Credential blast radius | Cognito token TTL | 1h access / 7d refresh | Leaked token expires fast; revocable on demand | Yes |

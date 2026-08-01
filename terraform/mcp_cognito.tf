@@ -29,12 +29,12 @@ resource "aws_cognito_user_pool" "mcp_server" {
     enabled = true
   }
 
-  # relying_party_id must exactly match the Hosted UI domain the WebAuthn
-  # ceremony runs on. Built from the raw variable (not the
-  # aws_cognito_user_pool_domain resource) to avoid a dependency cycle: that
-  # resource's user_pool_id already depends on this user pool.
+  # relying_party_id is left unset on purpose: Cognito only accepts it once
+  # it matches a domain actually associated with the pool, but
+  # aws_cognito_user_pool_domain necessarily depends on this pool's ID
+  # (setting it explicitly here would create a dependency cycle). Omitting
+  # it makes Cognito default to the pool's prefix domain automatically.
   web_authn_configuration {
-    relying_party_id  = "${var.mcp_cognito_domain_prefix}.auth.${var.aws_region}.amazoncognito.com"
     user_verification = "required"
   }
 }
@@ -63,10 +63,7 @@ resource "aws_cognito_user_pool_client" "mcp_server" {
   allowed_oauth_scopes                 = ["openid", "email"]
   supported_identity_providers         = ["COGNITO"]
 
-  callback_urls = [
-    "https://claude.ai/api/mcp/auth_callback",
-    "https://claude.com/api/mcp/auth_callback",
-  ]
+  callback_urls = var.mcp_oauth_callback_urls
 
   prevent_user_existence_errors = "ENABLED"
 

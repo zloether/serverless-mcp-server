@@ -1,5 +1,11 @@
 # serverless-mcp-server
 
+[MCP (Model Context Protocol)](https://modelcontextprotocol.io/) is the open
+standard AI tools like Claude use to call external tools over a standard
+API — a "remote MCP server" is one you host yourself and connect to Claude.ai
+(or another MCP-capable tool) as a custom connector, instead of running
+locally on your machine.
+
 Template for a serverless remote MCP server on AWS, deployable as a Claude.ai
 custom connector: API Gateway + Lambda + Cognito OAuth, with rate limiting
 (API Gateway throttling, Lambda concurrency cap, DynamoDB usage counter)
@@ -10,6 +16,13 @@ works end to end before you write any real tool logic.
 See [`docs/design-notes.md`](docs/design-notes.md) for the architecture and
 the reasoning behind each decision. See [`AGENTS.md`](AGENTS.md) for repo
 conventions.
+
+Tested end to end with Claude.ai's custom connector support. It implements
+the standard MCP Streamable HTTP transport with OAuth, so it should work
+with any other AI tool that supports custom MCP servers — just untested
+beyond Claude.ai. `var.mcp_oauth_callback_urls` defaults to Claude.ai's and
+Claude.com's OAuth redirect URIs; override it with `-var` (or a `.tfvars`
+file) to the other tool's redirect URI before connecting it.
 
 ## Prerequisites
 
@@ -53,13 +66,23 @@ conventions.
      --username you@example.com
    ```
 
-5. **Verify Hosted UI login manually** before connecting Claude.ai: visit
-   the URL from `terraform output mcp_cognito_hosted_ui_domain` +
-   `/login?client_id=<app_client_id>&response_type=code&redirect_uri=https://claude.ai/api/mcp/auth_callback`,
-   log in, set a password, complete MFA enrollment (TOTP or passkey).
+   Cognito emails a temporary password to that address (via its built-in
+   email service — no SES setup needed, capped at ~50 emails/day). You'll
+   need it for step 5.
+
+5. **Verify Hosted UI login manually** before connecting Claude.ai:
+
+   ```bash
+   terraform output -raw mcp_cognito_login_url
+   ```
+
+   Open the printed URL, log in with the temporary password from step 4,
+   set a permanent password when prompted, then complete MFA enrollment
+   (TOTP or passkey).
 
 6. **Add the custom connector in Claude.ai:** Settings → Connectors → Add
-   custom connector.
+   custom connector. **Must be done from a web browser** (claude.ai) — the
+   mobile app doesn't support adding custom connectors.
    - Server URL: `terraform output -raw mcp_server_url`
    - Advanced settings → OAuth Client ID: `terraform output -raw mcp_cognito_app_client_id`
    - OAuth Client Secret: `terraform output -raw mcp_cognito_app_client_secret`
@@ -71,6 +94,106 @@ conventions.
 
 Once step 7 works, replace the `hello_world` stub — see
 [`lambdas/hello-mcp/README.md`](lambdas/hello-mcp/README.md#adding-a-real-tool).
+
+## Cost considerations
+
+At low-traffic personal scale (a handful of users, well under the rate
+limits in [`docs/design-notes.md`](docs/design-notes.md) §3.4), everything
+here should stay inside AWS's always-free tier:
+
+| Service | Expected cost |
+|---|---|
+| Lambda | $0 — well inside the always-free 1M requests + 400K GB-s/month |
+| API Gateway (HTTP API) | $0–1/month |
+| Cognito | $0 — free under 10K MAUs |
+| DynamoDB (on-demand) | $0 — inside the always-free 25GB / 25 WCU-RCU tier |
+| CloudWatch | Low cents |
+| **Total** | **~$0–2/month** |
+
+This template's rate-limiting layers (API Gateway throttle, Lambda
+concurrency cap, DynamoDB usage counter) exist specifically to keep it there
+— see §3.4 for the full breakdown, including what's *not* included by
+default (a cost-anomaly AWS Budget with a Budget Action, and an optional WAF
+rate-based rule).
+
+- **Set a low-threshold AWS Budget** (e.g. $5/month) as a backstop against
+  the unknown — request-based counters can't catch cost from something they
+  didn't anticipate (e.g. a CloudWatch Logs ingestion spike).
+- **`terraform destroy`** tears everything down if you're done testing —
+  nothing here has a minimum commitment or termination fee.
+
+## Token lifetime
+
+Cognito issues a short-lived access token plus a longer-lived refresh
+token (Layer 5, [`docs/design-notes.md`](docs/design-notes.md) §3.4):
+
+- **Access token: 1 hour** — used per-request; Claude.ai refreshes it
+  silently, no reauthorization needed.
+- **Refresh token: 7 days** — once this expires, Claude.ai can no longer
+  silently refresh and you'll need to log back in through the Hosted UI
+  (step 5) to reauthorize the connector.
+
+7 days is a reasonable default for a personal/demo deployment — it limits
+how long a leaked credential stays useful. To extend it (e.g. so you don't
+have to reauthorize as often), edit the `aws_cognito_user_pool_client` block
+in `mcp_cognito.tf`:
+
+```hcl
+access_token_validity  = 1
+refresh_token_validity = 30  # was 7
+token_validity_units {
+  access_token  = "hours"
+  refresh_token = "days"
+}
+```
+
+Cognito allows `refresh_token_validity` up to `3650` days (10 years). Longer
+refresh tokens mean less friction but a bigger blast radius if one leaks —
+weigh that tradeoff for your own deployment.
+
+## Lambda concurrency
+
+`var.mcp_lambda_reserved_concurrency` (Layer 2 rate limiting, see
+[`docs/design-notes.md`](docs/design-notes.md) §3.4) defaults to `-1` — AWS's
+sentinel for "no reservation" — so `terraform apply` works out of the box.
+AWS always keeps at least **10 units unreserved** account-wide, no matter
+how high your account's total "Concurrent executions" quota is (1,000 by
+default, but new/low-usage accounts are sometimes provisioned well below
+that). If your account's total quota is at or near that 10-unit floor,
+reserving any amount above `0` for this Lambda fails with:
+
+```
+InvalidParameterValueException: Specified ReservedConcurrentExecutions for
+function decreases account's UnreservedConcurrentExecution below its
+minimum value of [10].
+```
+
+To enable a real per-function cap:
+
+1. **Request a quota increase** for Lambda "Concurrent executions" (1,000
+   gives plenty of headroom):
+
+   ```bash
+   aws service-quotas request-service-quota-increase \
+     --service-code lambda \
+     --quota-code L-B99A9384 \
+     --desired-value 1000
+   ```
+
+   Or via the console: Service Quotas → AWS services → Lambda → Concurrent
+   executions → Request increase. This can take anywhere from a few minutes
+   to a day or two to be approved.
+
+2. **Once approved**, set a real reservation (`2` is what this template was
+   designed around) and re-apply:
+
+   ```bash
+   cd terraform
+   terraform apply -var mcp_lambda_reserved_concurrency=2
+   ```
+
+   Or add `mcp_lambda_reserved_concurrency = 2` to a `.tfvars` file so you
+   don't have to pass `-var` on every apply.
 
 ## Running tests locally
 

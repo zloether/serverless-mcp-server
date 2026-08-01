@@ -18,6 +18,10 @@ build/
 # Local .terraform directories
 .terraform/
 
+# Scratch copy of terraform/ used for local apply-testing with real values —
+# never meant to be committed
+/terraform-dev/
+
 # .tfstate files
 *.tfstate
 *.tfstate.*
