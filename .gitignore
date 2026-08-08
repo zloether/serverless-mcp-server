@@ -50,3 +50,6 @@ override.tf.json
 # Ignore CLI configuration files
 .terraformrc
 terraform.rc
+
+# Claude Code local settings (per-machine, not shared)
+.claude/settings.local.json

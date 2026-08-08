@@ -17,12 +17,42 @@ See [`docs/design-notes.md`](docs/design-notes.md) for the architecture and
 the reasoning behind each decision. See [`AGENTS.md`](AGENTS.md) for repo
 conventions.
 
-Tested end to end with Claude.ai's custom connector support. It implements
-the standard MCP Streamable HTTP transport with OAuth, so it should work
-with any other AI tool that supports custom MCP servers — just untested
-beyond Claude.ai. `var.mcp_oauth_callback_urls` defaults to Claude.ai's and
-Claude.com's OAuth redirect URIs; override it with `-var` (or a `.tfvars`
-file) to the other tool's redirect URI before connecting it.
+Tested end to end with both Claude.ai's and ChatGPT's custom connector
+support (see `docs/chatgpt-oauth-notes.md` for ChatGPT-specific details). It
+implements the standard MCP Streamable HTTP transport with OAuth, so it
+should work with any other AI tool that supports custom MCP servers too —
+just untested beyond these two. `var.mcp_oauth_callback_urls` defaults to
+Claude.ai's and Claude.com's OAuth redirect URIs; override it with `-var`
+(or a `.tfvars` file) to the other tool's redirect URI before connecting it.
+
+**A note on the OAuth discovery `issuer`:** this server's
+`/.well-known/oauth-authorization-server` and
+`/.well-known/oauth-protected-resource` documents deliberately advertise
+this API's own base URL as the `issuer`, not Cognito's real issuer — this is
+intentional, not an oversight, so that spec-compliant clients keep resolving
+OAuth endpoints through this server's proxy routes (for CloudWatch
+visibility) instead of jumping straight to Cognito. The tradeoff: Cognito's
+issued tokens still carry Cognito's real `iss` claim, so a client that
+cross-checks a token's `iss` against the discovery document would see a
+mismatch. See `docs/chatgpt-oauth-notes.md` for the full reasoning.
+
+For example, to connect **ChatGPT**: enable Developer mode first (Settings →
+Apps & Connectors → Advanced settings) — it's off by default and required to
+add a custom MCP connector. ChatGPT shows a callback URL when you start
+adding the connector, unique per connector, shaped like
+`https://chatgpt.com/connector/oauth/<connector-id>`; set that as
+`mcp_oauth_callback_urls` before finishing the connection. When prompted for
+the OAuth client type, use "User-Defined OAuth Client" with token endpoint
+auth method `client_secret_post` (both ChatGPT's defaults) — matches this
+template's confidential Cognito app client.
+
+If the connection fails at the token exchange step with `invalid_grant`,
+this template already works around a known cause: ChatGPT's connector sends
+an OAuth `resource` parameter (RFC 8707) alongside PKCE that Cognito rejects
+outright since this user pool has no resource server registered for it. Both
+OAuth proxy routes in `handler.py` drop `resource` before forwarding to
+Cognito. See [`docs/chatgpt-oauth-notes.md`](docs/chatgpt-oauth-notes.md) for
+the full explanation of how ChatGPT's connector does OAuth and why.
 
 ## Prerequisites
 
@@ -194,6 +224,21 @@ To enable a real per-function cap:
 
    Or add `mcp_lambda_reserved_concurrency = 2` to a `.tfvars` file so you
    don't have to pass `-var` on every apply.
+
+## Debugging the OAuth connection
+
+If a connector fails to authenticate, see
+[`docs/DEBUGGING.md`](docs/DEBUGGING.md) for testing the OAuth + MCP chain
+directly with Postman — useful for isolating whether a failure is this
+server or the client's OAuth implementation.
+
+## License
+
+Apache 2.0 with the [Commons Clause](https://commonsclause.com/) (see
+[`LICENSE`](LICENSE)). Free to use, modify, and deploy — including for
+commercial purposes — but you can't sell the software itself or offer it
+(or a service substantially derived from it) to third parties for a fee,
+e.g. hosting this as a paid product.
 
 ## Running tests locally
 

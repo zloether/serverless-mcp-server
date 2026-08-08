@@ -31,7 +31,10 @@ See `docs/design-notes.md` for the architecture and the reasoning behind each de
 │   .windsurfrules,         # Keep them in sync if this file is renamed/moved.
 │   .cursor/rules/agents.mdc,
 │   .github/copilot-instructions.md
-├── docs/design-notes.md    # Why this architecture, Claude.ai connector requirements, rate-limiting design
+├── docs/
+│   ├── design-notes.md     # Why this architecture, Claude.ai connector requirements, rate-limiting design
+│   ├── DEBUGGING.md        # Testing the OAuth + MCP chain directly with Postman/curl
+│   └── chatgpt-oauth-notes.md  # How ChatGPT's connector does OAuth and what this template does to support it
 └── README.md               # Human-facing setup/deploy guide
 ```
 
