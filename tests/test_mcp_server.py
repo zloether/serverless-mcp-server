@@ -1,7 +1,9 @@
+import base64
 import importlib.util
 import json
 import os
 import sys
+import urllib.error
 from unittest.mock import MagicMock, patch
 
 _PATH = os.path.join(os.path.dirname(__file__), "../lambdas/hello-mcp/src/handler.py")
@@ -211,9 +213,218 @@ def test_discovery_document_contains_expected_endpoints():
     result = mcp_server.handler(event, None)
     assert result["statusCode"] == 200
     doc = _body(result)
-    assert doc["issuer"] == os.environ["COGNITO_ISSUER"]
-    assert doc["authorization_endpoint"] == f"{os.environ['HOSTED_UI_DOMAIN']}/oauth2/authorize"
-    assert doc["token_endpoint"] == f"{os.environ['HOSTED_UI_DOMAIN']}/oauth2/token"
+    # issuer is our own base, not Cognito's — so RFC 8414 discovery off
+    # authorization_servers (protected resource metadata) lands here rather
+    # than on Cognito's native, unproxied metadata document.
+    assert doc["issuer"] == os.environ["API_BASE_URL"]
+    # authorization_endpoint points at our own proxy route, not Cognito.
+    assert doc["authorization_endpoint"] == f"{os.environ['API_BASE_URL']}/oauth2/authorize"
+    # token_endpoint and jwks_uri also point at our own proxy routes, not
+    # Cognito directly — see the token/jwks proxy tests below.
+    assert doc["token_endpoint"] == f"{os.environ['API_BASE_URL']}/oauth2/token"
+    assert doc["jwks_uri"] == f"{os.environ['API_BASE_URL']}/.well-known/jwks.json"
+
+
+# ---------------------------------------------------------------------------
+# protected resource metadata
+# ---------------------------------------------------------------------------
+
+def test_protected_resource_metadata_contains_resource_and_authorization_server():
+    event = {
+        "rawPath": "/.well-known/oauth-protected-resource",
+        "requestContext": {"http": {"method": "GET", "sourceIp": "1.2.3.4"}},
+    }
+    result = mcp_server.handler(event, None)
+    assert result["statusCode"] == 200
+    doc = _body(result)
+    assert doc["resource"] == os.environ["MCP_SERVER_URL"]
+    assert doc["authorization_servers"] == [os.environ["API_BASE_URL"]]
+    assert doc["scopes_supported"] == ["openid", "email"]
+
+
+# ---------------------------------------------------------------------------
+# authorize proxy
+# ---------------------------------------------------------------------------
+
+def test_authorize_proxy_redirects_to_cognito_preserving_query():
+    raw_query = "response_type=code&client_id=abc&scope=openid+email&state=xyz"
+    event = {
+        "rawPath": "/oauth2/authorize",
+        "rawQueryString": raw_query,
+        "queryStringParameters": {"scope": "openid email"},
+        "requestContext": {"http": {"method": "GET", "sourceIp": "1.2.3.4"}},
+    }
+    result = mcp_server.handler(event, None)
+    assert result["statusCode"] == 302
+    assert result["headers"]["Location"] == f"{os.environ['HOSTED_UI_DOMAIN']}/oauth2/authorize?{raw_query}"
+
+
+def test_authorize_proxy_strips_resource_param():
+    raw_query = "response_type=code&client_id=abc&resource=https%3A%2F%2Fexample.com%2Fmcp&state=xyz"
+    event = {
+        "rawPath": "/oauth2/authorize",
+        "rawQueryString": raw_query,
+        "queryStringParameters": {},
+        "requestContext": {"http": {"method": "GET", "sourceIp": "1.2.3.4"}},
+    }
+    result = mcp_server.handler(event, None)
+    location = result["headers"]["Location"]
+    assert "resource" not in location
+    assert "response_type=code" in location
+    assert "client_id=abc" in location
+    assert "state=xyz" in location
+
+
+def test_authorize_proxy_without_query_redirects_to_bare_endpoint():
+    event = {
+        "rawPath": "/oauth2/authorize",
+        "requestContext": {"http": {"method": "GET", "sourceIp": "1.2.3.4"}},
+    }
+    result = mcp_server.handler(event, None)
+    assert result["statusCode"] == 302
+    assert result["headers"]["Location"] == f"{os.environ['HOSTED_UI_DOMAIN']}/oauth2/authorize"
+
+
+# ---------------------------------------------------------------------------
+# token proxy
+# ---------------------------------------------------------------------------
+
+def _http_response(body: bytes, status=200, content_type="application/json"):
+    resp = MagicMock()
+    resp.status = status
+    resp.read.return_value = body
+    resp.headers = {"Content-Type": content_type}
+    resp.__enter__.return_value = resp
+    resp.__exit__.return_value = False
+    return resp
+
+
+def _token_event(body, headers=None):
+    return {
+        "rawPath": "/oauth2/token",
+        "headers": headers or {"content-type": "application/x-www-form-urlencoded"},
+        "body": body,
+        "requestContext": {"http": {"method": "POST", "sourceIp": "1.2.3.4"}},
+    }
+
+
+def test_token_proxy_forwards_to_cognito_token_endpoint():
+    resp = _http_response(b'{"access_token": "at", "token_type": "Bearer"}')
+    event = _token_event("grant_type=authorization_code&client_id=abc&client_secret=shh&code=xyz")
+    with patch("mcp_server_handler.urllib.request.urlopen", return_value=resp) as mock_urlopen:
+        result = mcp_server.handler(event, None)
+    assert result["statusCode"] == 200
+    assert _body(result) == {"access_token": "at", "token_type": "Bearer"}
+    sent_request = mock_urlopen.call_args[0][0]
+    assert sent_request.full_url == f"{os.environ['HOSTED_UI_DOMAIN']}/oauth2/token"
+
+
+def test_token_proxy_forwards_authorization_header():
+    resp = _http_response(b'{"access_token": "at"}')
+    event = _token_event("grant_type=authorization_code", headers={"authorization": "Basic abc123"})
+    with patch("mcp_server_handler.urllib.request.urlopen", return_value=resp) as mock_urlopen:
+        mcp_server.handler(event, None)
+    sent_request = mock_urlopen.call_args[0][0]
+    assert sent_request.get_header("Authorization") == "Basic abc123"
+
+
+def test_token_proxy_decodes_base64_body():
+    resp = _http_response(b'{"access_token": "at"}')
+    raw = "grant_type=authorization_code&client_id=abc&client_secret=shh&code=xyz"
+    event = _token_event(base64.b64encode(raw.encode()).decode())
+    event["isBase64Encoded"] = True
+    with patch("mcp_server_handler.urllib.request.urlopen", return_value=resp) as mock_urlopen:
+        result = mcp_server.handler(event, None)
+    assert result["statusCode"] == 200
+    sent_body = mock_urlopen.call_args[0][0].data
+    assert sent_body == raw.encode()
+
+
+def test_token_proxy_surfaces_cognito_error_status():
+    error = urllib.error.HTTPError("url", 400, "Bad Request", {}, None)
+    error.read = MagicMock(return_value=b'{"error": "invalid_grant"}')
+    error.headers = {"Content-Type": "application/json"}
+    with patch("mcp_server_handler.urllib.request.urlopen", side_effect=error):
+        result = mcp_server.handler(_token_event("grant_type=authorization_code"), None)
+    assert result["statusCode"] == 400
+    assert _body(result) == {"error": "invalid_grant"}
+
+
+def test_token_proxy_strips_resource_param():
+    resp = _http_response(b'{"access_token": "at"}')
+    event = _token_event(
+        "grant_type=authorization_code&client_id=abc&client_secret=shh&code=xyz"
+        "&resource=https%3A%2F%2Fexample.com%2Fmcp"
+    )
+    with patch("mcp_server_handler.urllib.request.urlopen", return_value=resp) as mock_urlopen:
+        mcp_server.handler(event, None)
+    sent_body = mock_urlopen.call_args[0][0].data.decode()
+    assert "resource" not in sent_body
+    assert "grant_type=authorization_code" in sent_body
+    assert "code=xyz" in sent_body
+
+
+def test_redact_form_body_masks_client_secret_and_code():
+    redacted = mcp_server._redact_form_body(
+        "client_id=abc&client_secret=shh&code=xyz&grant_type=authorization_code"
+    )
+    assert "shh" not in redacted
+    assert "xyz" not in redacted
+    assert "client_id=abc" in redacted
+    assert "grant_type=authorization_code" in redacted
+
+
+def test_redact_form_body_masks_refresh_token():
+    redacted = mcp_server._redact_form_body("grant_type=refresh_token&refresh_token=super-secret&client_id=abc")
+    assert "super-secret" not in redacted
+    assert "client_id=abc" in redacted
+
+
+def test_headers_for_log_omits_headers_by_default():
+    assert "Basic abc123" not in mcp_server._headers_for_log({"authorization": "Basic abc123"})
+
+
+def test_headers_for_log_redacts_authorization_when_verbose():
+    with patch.object(mcp_server, "VERBOSE_OAUTH_LOGGING", True):
+        logged = mcp_server._headers_for_log({"authorization": "Basic abc123", "content-type": "text/plain"})
+    assert "abc123" not in logged
+    assert "text/plain" in logged
+
+
+def test_drop_params_preserves_encoding_of_untouched_params():
+    result = mcp_server._drop_params("redirect_uri=https%3A%2F%2Fx.com%2Fcb%3Fa%3Db%20c&resource=foo", ("resource",))
+    assert result == "redirect_uri=https%3A%2F%2Fx.com%2Fcb%3Fa%3Db%20c"
+
+
+def test_proxy_to_cognito_returns_502_on_network_error():
+    with patch("mcp_server_handler.urllib.request.urlopen", side_effect=urllib.error.URLError("connection refused")):
+        result = mcp_server.handler(_token_event("grant_type=authorization_code"), None)
+    assert result["statusCode"] == 502
+    assert _body(result)["error"] == "upstream_unavailable"
+
+
+def test_redact_token_response_masks_tokens_only():
+    redacted = json.loads(
+        mcp_server._redact_token_response(json.dumps({"access_token": "at", "refresh_token": "rt", "token_type": "Bearer"}))
+    )
+    assert redacted["access_token"] == mcp_server._REDACTED
+    assert redacted["refresh_token"] == mcp_server._REDACTED
+    assert redacted["token_type"] == "Bearer"
+
+
+# ---------------------------------------------------------------------------
+# jwks proxy
+# ---------------------------------------------------------------------------
+
+def test_jwks_proxy_forwards_to_cognito():
+    resp = _http_response(b'{"keys": []}')
+    event = {"rawPath": "/.well-known/jwks.json", "requestContext": {"http": {"method": "GET", "sourceIp": "1.2.3.4"}}}
+    with patch("mcp_server_handler.urllib.request.urlopen", return_value=resp) as mock_urlopen:
+        result = mcp_server.handler(event, None)
+    assert result["statusCode"] == 200
+    assert _body(result) == {"keys": []}
+    sent_request = mock_urlopen.call_args[0][0]
+    assert sent_request.full_url == f"{os.environ['COGNITO_ISSUER']}/.well-known/jwks.json"
 
 
 # ---------------------------------------------------------------------------

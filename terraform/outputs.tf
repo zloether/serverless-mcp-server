@@ -28,3 +28,28 @@ output "mcp_server_url" {
   value       = "${aws_apigatewayv2_stage.mcp_server_default.invoke_url}mcp"
   description = "Paste into Claude.ai's custom connector setup as the MCP server URL"
 }
+
+output "mcp_discovery_url" {
+  value       = "${aws_apigatewayv2_stage.mcp_server_default.invoke_url}.well-known/oauth-authorization-server"
+  description = "GET in Postman — unauthenticated OAuth authorization server metadata"
+}
+
+output "mcp_protected_resource_url" {
+  value       = "${aws_apigatewayv2_stage.mcp_server_default.invoke_url}.well-known/oauth-protected-resource"
+  description = "GET in Postman — unauthenticated protected resource metadata (RFC 9728)"
+}
+
+output "mcp_jwks_url" {
+  value       = "${aws_apigatewayv2_stage.mcp_server_default.invoke_url}.well-known/jwks.json"
+  description = "GET in Postman — unauthenticated JWKS used to verify access tokens"
+}
+
+output "mcp_oauth_authorize_url" {
+  value       = "${aws_apigatewayv2_stage.mcp_server_default.invoke_url}oauth2/authorize"
+  description = "GET in Postman (or a browser) — authorize proxy in front of Cognito Hosted UI login"
+}
+
+output "mcp_oauth_token_url" {
+  value       = "${aws_apigatewayv2_stage.mcp_server_default.invoke_url}oauth2/token"
+  description = "POST in Postman to exchange an authorization code (or refresh token) for an access token"
+}

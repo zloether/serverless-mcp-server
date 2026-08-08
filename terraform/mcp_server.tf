@@ -90,11 +90,14 @@ resource "aws_lambda_function" "mcp_server" {
 
   environment {
     variables = {
-      USAGE_TABLE_NAME = aws_dynamodb_table.mcp_usage_counters.name
-      DAILY_LIMIT      = "200"
-      MONTHLY_LIMIT    = "2000"
-      HOSTED_UI_DOMAIN = "https://${aws_cognito_user_pool_domain.mcp_server.domain}.auth.${var.aws_region}.amazoncognito.com"
-      COGNITO_ISSUER   = "https://cognito-idp.${var.aws_region}.amazonaws.com/${aws_cognito_user_pool.mcp_server.id}"
+      USAGE_TABLE_NAME      = aws_dynamodb_table.mcp_usage_counters.name
+      DAILY_LIMIT           = "200"
+      MONTHLY_LIMIT         = "2000"
+      HOSTED_UI_DOMAIN      = "https://${aws_cognito_user_pool_domain.mcp_server.domain}.auth.${var.aws_region}.amazoncognito.com"
+      COGNITO_ISSUER        = "https://cognito-idp.${var.aws_region}.amazonaws.com/${aws_cognito_user_pool.mcp_server.id}"
+      MCP_SERVER_URL        = "${aws_apigatewayv2_api.mcp_server.api_endpoint}/mcp"
+      API_BASE_URL          = aws_apigatewayv2_api.mcp_server.api_endpoint
+      VERBOSE_OAUTH_LOGGING = tostring(var.mcp_verbose_oauth_logging)
     }
   }
 }
@@ -150,6 +153,43 @@ resource "aws_apigatewayv2_route" "mcp_discovery" {
   target    = "integrations/${aws_apigatewayv2_integration.mcp_server.id}"
 }
 
+# Protected resource metadata (RFC 9728) — also public, fetched by MCP
+# clients before the authorization-server metadata above, to learn which
+# authorization server(s) protect this resource.
+resource "aws_apigatewayv2_route" "mcp_protected_resource" {
+  api_id    = aws_apigatewayv2_api.mcp_server.id
+  route_key = "GET /.well-known/oauth-protected-resource"
+  target    = "integrations/${aws_apigatewayv2_integration.mcp_server.id}"
+}
+
+# Authorization endpoint proxy — also public (it sits in front of login). The
+# Lambda logs the inbound query params, then 302s to Cognito's real
+# /oauth2/authorize. Advertised as authorization_endpoint in the discovery
+# document so the client's authorization request passes through our logs.
+resource "aws_apigatewayv2_route" "mcp_authorize" {
+  api_id    = aws_apigatewayv2_api.mcp_server.id
+  route_key = "GET /oauth2/authorize"
+  target    = "integrations/${aws_apigatewayv2_integration.mcp_server.id}"
+}
+
+# Token endpoint proxy — same rationale as the authorize proxy above, for
+# the token exchange/refresh step. Also public: it authenticates the caller
+# itself (client secret or PKCE verifier in the forwarded request), same as
+# Cognito's real /oauth2/token would.
+resource "aws_apigatewayv2_route" "mcp_token" {
+  api_id    = aws_apigatewayv2_api.mcp_server.id
+  route_key = "POST /oauth2/token"
+  target    = "integrations/${aws_apigatewayv2_integration.mcp_server.id}"
+}
+
+# JWKS proxy — public keys, forwarded so this fetch is visible in our logs
+# too. Advertised as jwks_uri in the discovery document.
+resource "aws_apigatewayv2_route" "mcp_jwks" {
+  api_id    = aws_apigatewayv2_api.mcp_server.id
+  route_key = "GET /.well-known/jwks.json"
+  target    = "integrations/${aws_apigatewayv2_integration.mcp_server.id}"
+}
+
 resource "aws_apigatewayv2_stage" "mcp_server_default" {
   api_id      = aws_apigatewayv2_api.mcp_server.id
   name        = "$default"
@@ -167,6 +207,35 @@ resource "aws_apigatewayv2_stage" "mcp_server_default" {
   # higher account-default limit.
   route_settings {
     route_key              = aws_apigatewayv2_route.mcp_discovery.route_key
+    throttling_rate_limit  = 2
+    throttling_burst_limit = 5
+  }
+
+  # Same cap on the protected resource metadata route — also unauthenticated.
+  route_settings {
+    route_key              = aws_apigatewayv2_route.mcp_protected_resource.route_key
+    throttling_rate_limit  = 2
+    throttling_burst_limit = 5
+  }
+
+  # Same cap on the authorize proxy route — also unauthenticated.
+  route_settings {
+    route_key              = aws_apigatewayv2_route.mcp_authorize.route_key
+    throttling_rate_limit  = 2
+    throttling_burst_limit = 5
+  }
+
+  # Same cap on the token proxy route — also unauthenticated (it authenticates
+  # the caller itself via the forwarded request body/headers).
+  route_settings {
+    route_key              = aws_apigatewayv2_route.mcp_token.route_key
+    throttling_rate_limit  = 2
+    throttling_burst_limit = 5
+  }
+
+  # Same cap on the JWKS proxy route — also unauthenticated.
+  route_settings {
+    route_key              = aws_apigatewayv2_route.mcp_jwks.route_key
     throttling_rate_limit  = 2
     throttling_burst_limit = 5
   }

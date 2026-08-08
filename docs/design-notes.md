@@ -106,9 +106,22 @@ in `handler.py`.
   vs $3.50 for REST API.
 - `ANY /mcp` → Lambda proxy integration. One Lambda implements the MCP
   protocol surface (`initialize`, `tools/list`, `tools/call`).
-- A route for `GET /.well-known/oauth-authorization-server`, pointing at the
-  Cognito Hosted UI's authorize/token endpoints, so Claude.ai's OAuth
-  discovery step succeeds. No auth in front of it — it's public metadata.
+- A route for `GET /.well-known/oauth-authorization-server`, so Claude.ai's
+  OAuth discovery step succeeds. No auth in front of it — it's public
+  metadata.
+- The discovery document's `authorization_endpoint`, `token_endpoint`, and
+  `jwks_uri` all point back at this server's own proxy routes
+  (`/oauth2/authorize`, `/oauth2/token`, `/.well-known/jwks.json`) rather
+  than Cognito's domain directly — each logs the request/response (with
+  secrets redacted) before forwarding to the real Cognito endpoint, so the
+  full OAuth exchange is visible in CloudWatch instead of happening entirely
+  between the client and Cognito. See `docs/DEBUGGING.md` for using this to
+  test the flow with Postman.
+- Both proxy routes drop the OAuth `resource` parameter (RFC 8707) before
+  forwarding to Cognito — this user pool has no resource server registered
+  for it, and a client sending it alongside PKCE (ChatGPT's connector does
+  both) made Cognito reject the token exchange with `invalid_grant`. See
+  `docs/chatgpt-oauth-notes.md` for the full explanation.
 
 ### 3.3 Data layer
 
@@ -157,9 +170,10 @@ for requesting a quota increase and setting a real reservation (e.g. `2`)
 once it's approved.
 
 **Layer 3 — Application-level cumulative cap (the actual kill switch)**
-A DynamoDB counter table (`usage-counters`, PK `date#YYYY-MM-DD` and
-`month#YYYY-MM`), atomically incremented (`UpdateItem` + `ADD`) on every
-tool invocation (`usage_cap.py`). Before doing any real work, the Lambda
+A DynamoDB counter table (`usage-counters`, PK `counter_id`), with one item
+per day (`date#YYYY-MM-DD`) and one per month (`month#YYYY-MM`), atomically
+incremented (`UpdateItem` + `ADD`) on every tool invocation (`usage_cap.py`).
+Before doing any real work, the Lambda
 checks the counter; if the threshold is exceeded it short-circuits and
 returns an MCP error ("usage cap reached") instead of proceeding.
 
