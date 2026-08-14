@@ -26,6 +26,7 @@ MCP server template that Claude.ai or ChatGPT (tested) — or in principle any M
 | `MCP_SERVER_URL` | Yes | This server's own `/mcp` URL, used as the `resource` field in the protected-resource metadata document (RFC 9728) |
 | `API_BASE_URL` | Yes | This API Gateway's base URL, used as the discovery document's `issuer`/`authorization_servers` and to build this server's own OAuth proxy routes (`authorization_endpoint`, `token_endpoint`, `jwks_uri`) |
 | `VERBOSE_OAUTH_LOGGING` | No | Set to `"true"` to have the OAuth proxy routes (`/oauth2/authorize`, `/oauth2/token`) log full request/response headers to CloudWatch. Off by default — the proxy routes always log redacted bodies regardless; this only controls the noisier header dumps. See `docs/DEBUGGING.md` |
+| `STRIP_OAUTH_PARAMS` | No | Comma-separated list of query/body param names (e.g. `"resource"` or `"resource,foo"`) for the OAuth proxy routes to drop before forwarding to Cognito. Empty by default — Cognito has a resource server registered (`terraform/mcp_cognito.tf`) and accepts standard params, including RFC 8707's `resource`, natively. See `docs/chatgpt-oauth-notes.md` |
 
 ## Dependencies
 
@@ -41,8 +42,8 @@ API Gateway HTTP API v2 proxy event. Routed by `rawPath`:
 
 - `GET /.well-known/oauth-authorization-server` — returns the static OAuth Authorization Server Metadata JSON (RFC 8414), no auth required.
 - `GET /.well-known/oauth-protected-resource` — returns the static OAuth Protected Resource Metadata JSON (RFC 9728), no auth required.
-- `GET /oauth2/authorize` — proxies to Cognito's Hosted UI `/oauth2/authorize`. Logs the inbound query string, drops the `resource` param (Cognito has no resource server registered for it — see `docs/chatgpt-oauth-notes.md`), then 302s to Cognito with the rest forwarded verbatim.
-- `POST /oauth2/token` — proxies to Cognito's `/oauth2/token`. Logs the request/response at every hop (inbound from API Gateway, outbound to Cognito, inbound from Cognito, outbound to API Gateway) with `client_secret`/`code`/`code_verifier`/`access_token`/`id_token`/`refresh_token` redacted, and drops `resource` before forwarding, same as the authorize proxy.
+- `GET /oauth2/authorize` — proxies to Cognito's Hosted UI `/oauth2/authorize`. Logs the inbound query string, then 302s to Cognito with the query forwarded verbatim (minus whatever `STRIP_OAUTH_PARAMS` configures — nothing, by default; see `docs/chatgpt-oauth-notes.md`).
+- `POST /oauth2/token` — proxies to Cognito's `/oauth2/token`. Logs the request/response at every hop (inbound from API Gateway, outbound to Cognito, inbound from Cognito, outbound to API Gateway) with `client_secret`/`code`/`code_verifier`/`access_token`/`id_token`/`refresh_token` redacted, and drops the same `STRIP_OAUTH_PARAMS`-configured params before forwarding, same as the authorize proxy.
 - `GET /.well-known/jwks.json` — proxies to Cognito's JWKS endpoint, no auth required.
 - `ANY /mcp` — behind the API Gateway JWT authorizer. Body is a single JSON-RPC 2.0 request; response is a single JSON-RPC 2.0 response (no SSE, no session tracking — each request is self-contained). `tools/call` params take the standard MCP shape: `{"name": "hello_world", "arguments": {"name": "Claude"}}`.
 

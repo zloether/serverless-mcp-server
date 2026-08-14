@@ -14,8 +14,8 @@ output "mcp_cognito_app_client_id" {
 }
 
 output "mcp_cognito_login_url" {
-  value       = "https://${aws_cognito_user_pool_domain.mcp_server.domain}.auth.${var.aws_region}.amazoncognito.com/login?client_id=${aws_cognito_user_pool_client.mcp_server.id}&response_type=code&redirect_uri=${var.mcp_oauth_callback_urls[0]}"
-  description = "Open in a browser to manually verify Hosted UI login before connecting Claude.ai (or another MCP-capable AI tool, if var.mcp_oauth_callback_urls was overridden)"
+  value       = "https://${aws_cognito_user_pool_domain.mcp_server.domain}.auth.${var.aws_region}.amazoncognito.com/login?client_id=${aws_cognito_user_pool_client.mcp_server.id}&response_type=code&redirect_uri=${local.mcp_oauth_callback_urls[0]}"
+  description = "Open in a browser to manually verify Hosted UI login before connecting Claude.ai (or another MCP-capable AI tool added via var.mcp_oauth_callback_urls)"
 }
 
 output "mcp_cognito_app_client_secret" {

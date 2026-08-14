@@ -56,16 +56,23 @@ This template proxies all of them through the Lambda instead
 ## The `resource` param (RFC 8707)
 
 ChatGPT's connector sends an OAuth `resource` parameter — this MCP server's
-own URL — on both the authorize and token requests. This Cognito user pool
-has no resource server registered for it, and Cognito rejects the PKCE token
-exchange outright when `resource` is present (`invalid_grant`), even though
-the same request without it succeeds.
+own URL — on both the authorize and token requests. Cognito rejects the PKCE
+token exchange outright when `resource` is present and no resource server is
+registered for it (`invalid_grant`), even though the same request without it
+succeeds.
 
-Both proxy routes drop `resource` before forwarding to Cognito
-(`_DROPPED_OAUTH_PARAMS` / `_drop_params` in `handler.py`) rather than
-trying to get Cognito to honor it. This is not a client-specific special
-case — the MCP client that provided the reproduction happened to be
-ChatGPT, but this fix applies to any client that sends RFC 8707 `resource`.
+Fixed properly rather than worked around: `mcp_cognito.tf` registers an
+`aws_cognito_resource_server` whose `identifier` matches this server's own
+URL (`MCP_SERVER_URL`, what ChatGPT sends as `resource`). This turns on
+Cognito's native **"resource binding"** (Managed Login only), which does two
+things — accepts `resource=<identifier>` at `/oauth2/authorize` instead of
+rejecting the token exchange, and sets the issued access token's `aud` claim
+to that identifier. Both proxy routes forward `resource` to Cognito
+unmodified by default; nothing is dropped. `handler.py`'s
+`_DROPPED_OAUTH_PARAMS` (populated from `var.mcp_strip_oauth_params`, empty
+by default) is a generic escape hatch — a comma-separated list of any param
+names to strip before forwarding to Cognito, for a pool without a matching
+resource server or a client sending something else Cognito rejects.
 
 ## Known limitations
 
@@ -73,9 +80,3 @@ ChatGPT, but this fix applies to any client that sends RFC 8707 `resource`.
   JWT authorizer can't emit custom response headers. Fixing this would
   require swapping to a Lambda authorizer — a bigger, more invasive change
   to auth-critical code.
-- **`resource` isn't bound to the token's `aud` claim.** Cognito access
-  tokens carry no `aud` claim at all (see `docs/design-notes.md` §3.1); API
-  Gateway's JWT authorizer works around this by matching `audience` against
-  the token's `client_id` claim instead. A Cognito Pre Token Generation
-  Lambda trigger could bind `resource` → `aud`, but this is moot while
-  `resource` is simply dropped rather than honored (see above).

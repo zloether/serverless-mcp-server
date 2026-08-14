@@ -259,7 +259,7 @@ def test_authorize_proxy_redirects_to_cognito_preserving_query():
     assert result["headers"]["Location"] == f"{os.environ['HOSTED_UI_DOMAIN']}/oauth2/authorize?{raw_query}"
 
 
-def test_authorize_proxy_strips_resource_param():
+def test_authorize_proxy_forwards_resource_param_by_default():
     raw_query = "response_type=code&client_id=abc&resource=https%3A%2F%2Fexample.com%2Fmcp&state=xyz"
     event = {
         "rawPath": "/oauth2/authorize",
@@ -268,6 +268,19 @@ def test_authorize_proxy_strips_resource_param():
         "requestContext": {"http": {"method": "GET", "sourceIp": "1.2.3.4"}},
     }
     result = mcp_server.handler(event, None)
+    assert result["headers"]["Location"] == f"{os.environ['HOSTED_UI_DOMAIN']}/oauth2/authorize?{raw_query}"
+
+
+def test_authorize_proxy_strips_params_when_configured():
+    raw_query = "response_type=code&client_id=abc&resource=https%3A%2F%2Fexample.com%2Fmcp&state=xyz"
+    event = {
+        "rawPath": "/oauth2/authorize",
+        "rawQueryString": raw_query,
+        "queryStringParameters": {},
+        "requestContext": {"http": {"method": "GET", "sourceIp": "1.2.3.4"}},
+    }
+    with patch.object(mcp_server, "_DROPPED_OAUTH_PARAMS", ("resource",)):
+        result = mcp_server.handler(event, None)
     location = result["headers"]["Location"]
     assert "resource" not in location
     assert "response_type=code" in location
@@ -350,7 +363,7 @@ def test_token_proxy_surfaces_cognito_error_status():
     assert _body(result) == {"error": "invalid_grant"}
 
 
-def test_token_proxy_strips_resource_param():
+def test_token_proxy_forwards_resource_param_by_default():
     resp = _http_response(b'{"access_token": "at"}')
     event = _token_event(
         "grant_type=authorization_code&client_id=abc&client_secret=shh&code=xyz"
@@ -359,9 +372,27 @@ def test_token_proxy_strips_resource_param():
     with patch("mcp_server_handler.urllib.request.urlopen", return_value=resp) as mock_urlopen:
         mcp_server.handler(event, None)
     sent_body = mock_urlopen.call_args[0][0].data.decode()
+    assert "resource=https%3A%2F%2Fexample.com%2Fmcp" in sent_body
+
+
+def test_token_proxy_strips_params_when_configured():
+    resp = _http_response(b'{"access_token": "at"}')
+    event = _token_event(
+        "grant_type=authorization_code&client_id=abc&client_secret=shh&code=xyz"
+        "&resource=https%3A%2F%2Fexample.com%2Fmcp"
+    )
+    with patch.object(mcp_server, "_DROPPED_OAUTH_PARAMS", ("resource",)):
+        with patch("mcp_server_handler.urllib.request.urlopen", return_value=resp) as mock_urlopen:
+            mcp_server.handler(event, None)
+    sent_body = mock_urlopen.call_args[0][0].data.decode()
     assert "resource" not in sent_body
     assert "grant_type=authorization_code" in sent_body
     assert "code=xyz" in sent_body
+
+
+def test_parse_param_list_splits_and_trims_comma_separated_names():
+    assert mcp_server._parse_param_list("resource, foo,,bar") == ("resource", "foo", "bar")
+    assert mcp_server._parse_param_list("") == ()
 
 
 def test_redact_form_body_masks_client_secret_and_code():

@@ -80,15 +80,19 @@ in `handler.py`.
   `/oauth2/token` URLs into Claude.ai's connector setup, in Advanced
   settings.
 - **Known gotcha, already solved in `terraform/mcp_server.tf`:** Cognito
-  access tokens carry no `aud` claim, which trips up API Gateway's built-in
-  JWT authorizer (which expects to validate against an audience). Fix:
-  validate against the token's `client_id` claim instead — API Gateway's JWT
-  authorizer does this automatically when you set `audience` to the app
-  client ID:
+  access tokens carry an `aud` claim only when the client sent a `resource`
+  param (RFC 8707) at `/oauth2/authorize` — otherwise there's no `aud` at
+  all, which trips up API Gateway's built-in JWT authorizer (which expects to
+  validate against an audience). When `aud` is absent, the authorizer falls
+  back to matching `audience` against the token's `client_id` claim instead;
+  when a resource-binding client sets `aud` to the resource server's
+  identifier (see `aws_cognito_resource_server.mcp_server` in
+  `mcp_cognito.tf`, §3.2 below), that identifier has to be a valid audience
+  too. Fix: list both:
 
   ```hcl
   jwt_configuration {
-    audience = [aws_cognito_user_pool_client.mcp_server.id]
+    audience = [aws_cognito_user_pool_client.mcp_server.id, aws_cognito_resource_server.mcp_server.identifier]
     issuer   = "https://cognito-idp.${var.aws_region}.amazonaws.com/${aws_cognito_user_pool.mcp_server.id}"
   }
   ```
@@ -117,11 +121,13 @@ in `handler.py`.
   full OAuth exchange is visible in CloudWatch instead of happening entirely
   between the client and Cognito. See `docs/DEBUGGING.md` for using this to
   test the flow with Postman.
-- Both proxy routes drop the OAuth `resource` parameter (RFC 8707) before
-  forwarding to Cognito — this user pool has no resource server registered
-  for it, and a client sending it alongside PKCE (ChatGPT's connector does
-  both) made Cognito reject the token exchange with `invalid_grant`. See
-  `docs/chatgpt-oauth-notes.md` for the full explanation.
+- The user pool has a resource server registered (`mcp_cognito.tf`), so
+  Cognito's native "resource binding" accepts the OAuth `resource` parameter
+  (RFC 8707) — both proxy routes forward it to Cognito unmodified by
+  default, no special-casing needed. `var.mcp_strip_oauth_params` (an empty
+  list by default) can still name specific params for the proxy routes to
+  drop before forwarding, e.g. for a pool without a matching resource server.
+  See `docs/chatgpt-oauth-notes.md` for the full explanation.
 
 ### 3.3 Data layer
 
