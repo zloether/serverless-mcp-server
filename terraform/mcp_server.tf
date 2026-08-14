@@ -98,6 +98,7 @@ resource "aws_lambda_function" "mcp_server" {
       MCP_SERVER_URL        = "${aws_apigatewayv2_api.mcp_server.api_endpoint}/mcp"
       API_BASE_URL          = aws_apigatewayv2_api.mcp_server.api_endpoint
       VERBOSE_OAUTH_LOGGING = tostring(var.mcp_verbose_oauth_logging)
+      STRIP_OAUTH_PARAMS    = join(",", var.mcp_strip_oauth_params)
     }
   }
 }
@@ -115,10 +116,17 @@ resource "aws_apigatewayv2_api" "mcp_server" {
   protocol_type = "HTTP"
 }
 
-# Cognito access tokens carry no `aud` claim — API Gateway's JWT authorizer
-# falls back to matching `audience` against the token's `client_id` claim
-# when `aud` is absent, which is exactly what's configured here. Confirmed
-# working via manual Hosted UI login (see docs/design-notes.md).
+# Two valid audiences, because Cognito's `aud` claim depends on what the
+# client sent at /oauth2/authorize:
+# - No `resource` param (or a client that predates resource binding): the
+#   access token carries no `aud` claim at all, and API Gateway's JWT
+#   authorizer falls back to matching `audience` against the `client_id`
+#   claim instead — hence the app client ID below.
+# - `resource=<mcp_server_url>` (RFC 8707, forwarded by default since the
+#   resource server below is registered): Cognito sets `aud` to that
+#   identifier, so it must also be in this list or a spec-compliant client's
+#   token gets rejected by the authorizer. See docs/design-notes.md §3.1 and
+#   docs/chatgpt-oauth-notes.md.
 resource "aws_apigatewayv2_authorizer" "mcp_server" {
   api_id           = aws_apigatewayv2_api.mcp_server.id
   authorizer_type  = "JWT"
@@ -126,7 +134,7 @@ resource "aws_apigatewayv2_authorizer" "mcp_server" {
   name             = "mcp-cognito-jwt"
 
   jwt_configuration {
-    audience = [aws_cognito_user_pool_client.mcp_server.id]
+    audience = [aws_cognito_user_pool_client.mcp_server.id, aws_cognito_resource_server.mcp_server.identifier]
     issuer   = "https://cognito-idp.${var.aws_region}.amazonaws.com/${aws_cognito_user_pool.mcp_server.id}"
   }
 }

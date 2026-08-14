@@ -49,6 +49,19 @@ resource "aws_cognito_user_pool_domain" "mcp_server" {
   managed_login_version = 2
 }
 
+# Claude.ai/Claude.com are always allowed, independent of
+# var.mcp_oauth_callback_urls — kept as a local rather than the variable's
+# default so a tfvars override (e.g. dev.auto.tfvars adding ChatGPT's or
+# Postman's callback) extends this set instead of replacing it, letting the
+# same app client serve multiple AI tools at once.
+locals {
+  mcp_default_oauth_callback_urls = [
+    "https://claude.ai/api/mcp/auth_callback",
+    "https://claude.com/api/mcp/auth_callback",
+  ]
+  mcp_oauth_callback_urls = distinct(concat(local.mcp_default_oauth_callback_urls, var.mcp_oauth_callback_urls))
+}
+
 resource "aws_cognito_user_pool_client" "mcp_server" {
   name         = "serverless-mcp-client"
   user_pool_id = aws_cognito_user_pool.mcp_server.id
@@ -63,7 +76,7 @@ resource "aws_cognito_user_pool_client" "mcp_server" {
   allowed_oauth_scopes                 = ["openid", "email"]
   supported_identity_providers         = ["COGNITO"]
 
-  callback_urls = var.mcp_oauth_callback_urls
+  callback_urls = local.mcp_oauth_callback_urls
 
   prevent_user_existence_errors = "ENABLED"
 
@@ -75,6 +88,24 @@ resource "aws_cognito_user_pool_client" "mcp_server" {
     access_token  = "hours"
     refresh_token = "days"
   }
+}
+
+# Resource server registered purely to enable Cognito's resource binding
+# (RFC 8707 `resource` param support, Managed Login only — see
+# docs/chatgpt-oauth-notes.md). No custom scopes needed: registering the
+# identifier is what makes Cognito accept `resource=<identifier>` at
+# /oauth2/authorize instead of rejecting the token exchange with
+# invalid_grant, and it makes Cognito set the access token's `aud` claim to
+# this value. Identifier must exactly match the `resource` value clients
+# send (ChatGPT's connector sends `${api_endpoint}/mcp`, i.e. MCP_SERVER_URL).
+# The API Gateway JWT authorizer's `audience` list (mcp_server.tf) includes
+# this identifier alongside the app client ID, since it's what `aud` becomes
+# for any client that sends `resource` — forwarded by default now that this
+# resource server exists (var.mcp_strip_oauth_params).
+resource "aws_cognito_resource_server" "mcp_server" {
+  identifier   = "${aws_apigatewayv2_api.mcp_server.api_endpoint}/mcp"
+  name         = "MCP server"
+  user_pool_id = aws_cognito_user_pool.mcp_server.id
 }
 
 # Managed Login (managed_login_version = 2 above) renders pages per app

@@ -21,9 +21,11 @@ Tested end to end with both Claude.ai's and ChatGPT's custom connector
 support (see `docs/chatgpt-oauth-notes.md` for ChatGPT-specific details). It
 implements the standard MCP Streamable HTTP transport with OAuth, so it
 should work with any other AI tool that supports custom MCP servers too —
-just untested beyond these two. `var.mcp_oauth_callback_urls` defaults to
-Claude.ai's and Claude.com's OAuth redirect URIs; override it with `-var`
-(or a `.tfvars` file) to the other tool's redirect URI before connecting it.
+just untested beyond these two. Claude.ai's and Claude.com's OAuth redirect
+URIs are always allowed (`locals.mcp_default_oauth_callback_urls` in
+`mcp_cognito.tf`); set `var.mcp_oauth_callback_urls` via `-var` (or a
+`.tfvars` file) to add another tool's redirect URI alongside them, not
+instead of them — the same app client can serve multiple AI tools at once.
 
 **A note on the OAuth discovery `issuer`:** this server's
 `/.well-known/oauth-authorization-server` and
@@ -46,13 +48,15 @@ the OAuth client type, use "User-Defined OAuth Client" with token endpoint
 auth method `client_secret_post` (both ChatGPT's defaults) — matches this
 template's confidential Cognito app client.
 
-If the connection fails at the token exchange step with `invalid_grant`,
-this template already works around a known cause: ChatGPT's connector sends
-an OAuth `resource` parameter (RFC 8707) alongside PKCE that Cognito rejects
-outright since this user pool has no resource server registered for it. Both
-OAuth proxy routes in `handler.py` drop `resource` before forwarding to
-Cognito. See [`docs/chatgpt-oauth-notes.md`](docs/chatgpt-oauth-notes.md) for
-the full explanation of how ChatGPT's connector does OAuth and why.
+ChatGPT's connector sends an OAuth `resource` parameter (RFC 8707) alongside
+PKCE, which Cognito rejects with `invalid_grant` unless a matching resource
+server is registered for it. `terraform/mcp_cognito.tf` already registers
+one, so this works out of the box, standards-compliant — nothing is stripped
+from the request by default. If a client sends some other param a
+differently-configured Cognito pool rejects, set
+`var.mcp_strip_oauth_params` (e.g. `["resource"]`) to drop it before
+forwarding. See [`docs/chatgpt-oauth-notes.md`](docs/chatgpt-oauth-notes.md)
+for the full explanation of how ChatGPT's connector does OAuth and why.
 
 ## Prerequisites
 

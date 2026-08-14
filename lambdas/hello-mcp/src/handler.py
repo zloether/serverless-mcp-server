@@ -201,14 +201,21 @@ def _handle_protected_resource_metadata():
 # invalid_scope. Advertising this route as the authorization_endpoint routes
 # that request through the Lambda first: we log the exact query string, then
 # 302 on to Cognito's real authorize endpoint, forwarding the params verbatim
-# (minus `resource` — see _DROPPED_OAUTH_PARAMS below).
+# (minus whatever STRIP_OAUTH_PARAMS configures — see _DROPPED_OAUTH_PARAMS
+# below, empty/standards-compliant by default).
 # ---------------------------------------------------------------------------
-# `resource` (RFC 8707) is dropped before forwarding to Cognito: this user
-# pool has no resource server registered for it, and it's the one param that
-# differs between requests that complete cleanly and ChatGPT's real
-# connector flow, which fails token exchange with invalid_grant. See
+# Nothing is dropped by default — Cognito has a resource server registered
+# (mcp_cognito.tf) and accepts standard params, including RFC 8707's
+# `resource`, natively via "resource binding". Set STRIP_OAUTH_PARAMS to a
+# comma-separated list of param names (e.g. "resource" or "resource,foo") to
+# drop specific params again before forwarding to Cognito, e.g. if a
+# differently-configured pool rejects something a client sends. See
 # docs/chatgpt-oauth-notes.md.
-_DROPPED_OAUTH_PARAMS = ("resource",)
+def _parse_param_list(value: str) -> tuple:
+    return tuple(name.strip() for name in value.split(",") if name.strip())
+
+
+_DROPPED_OAUTH_PARAMS = _parse_param_list(os.environ.get("STRIP_OAUTH_PARAMS", ""))
 
 _REDACTED = "***REDACTED***"
 _REDACTED_HEADERS = ("authorization",)

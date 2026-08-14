@@ -9,13 +9,13 @@ Lambda return at each step, independent of any client quirks.
 ## 1. Allow Postman's callback URL
 
 Postman's OAuth 2.0 helper redirects to `https://oauth.pstmn.io/v1/callback`.
-Add it to `mcp_oauth_callback_urls` alongside your real client(s) and
+Claude.ai's and Claude.com's callback URLs are always allowed
+(`locals.mcp_default_oauth_callback_urls` in `mcp_cognito.tf`), so
+`mcp_oauth_callback_urls` only needs Postman's added on top, then
 `terraform apply`:
 
 ```hcl
 mcp_oauth_callback_urls = [
-  "https://claude.ai/api/mcp/auth_callback",
-  "https://claude.com/api/mcp/auth_callback",
   "https://oauth.pstmn.io/v1/callback",
 ]
 ```
@@ -95,15 +95,17 @@ the response verbatim.
 - `Authorize proxy | inbound from API Gateway | ...` — method, headers, and
   the full authorization request query string, including `scope`.
 - `Authorize proxy | outbound to API Gateway | redirect=...` — the exact
-  Cognito URL the browser gets 302'd to, **after** the `resource` param
-  (see below) is dropped. There's no separate "Cognito's response" log for
-  this route — the browser talks to Cognito directly after the redirect, so
-  the only server-side visibility is what we redirected it to.
+  Cognito URL the browser gets 302'd to, **after** any params configured via
+  `STRIP_OAUTH_PARAMS` (see below) are dropped — none by default. There's no
+  separate "Cognito's response" log for this route — the browser talks to
+  Cognito directly after the redirect, so the only server-side visibility is
+  what we redirected it to.
 - `Token proxy | inbound from API Gateway | ...` — method, headers, and the
   token exchange body as received, with `client_secret`, `code`, and
   `code_verifier` redacted.
 - `Token proxy | outbound to Cognito | ...` — URL, headers, and body actually
-  sent to Cognito, same redaction, **after** `resource` is dropped.
+  sent to Cognito, same redaction, **after** any configured params are
+  dropped.
 - `Token proxy | inbound from Cognito | ...` — Cognito's raw status, headers,
   and body, with `access_token` / `id_token` / `refresh_token` redacted
   (only `token_type`/`expires_in`/etc. are logged in the clear).
@@ -127,14 +129,14 @@ redacted (`_headers_for_log` in `handler.py`) — it carries the
 `client_secret_basic` credential, and turning on verbose logging shouldn't
 mean writing that to CloudWatch in plaintext.
 
-**`resource` (RFC 8707) is dropped, not forwarded.** Both proxy routes strip
-it before talking to Cognito — this user pool has no resource server
-registered for it, and a client sending it alongside PKCE (ChatGPT's
-connector does both) made Cognito reject the token exchange with
-`invalid_grant`. See `docs/chatgpt-oauth-notes.md` for why. If
-you're testing manually and want to see what a client actually sent before
-it was dropped, look at the `inbound from API Gateway` log line, not
-`outbound to Cognito`.
+**`resource` (RFC 8707) is forwarded, not dropped.** This user pool has a
+resource server registered (`mcp_cognito.tf`), so Cognito accepts it natively
+via resource binding — see `docs/chatgpt-oauth-notes.md`. Nothing is stripped
+by default; `var.mcp_strip_oauth_params` (empty by default) can name specific
+params for both proxy routes to drop before talking to Cognito, e.g. for a
+pool without a matching resource server. If you've set it and want to see
+what a client actually sent before a param was dropped, look at the
+`inbound from API Gateway` log line, not `outbound to Cognito`.
 
 ## Common failure points
 
@@ -143,7 +145,7 @@ it was dropped, look at the `inbound from API Gateway` log line, not
 | Postman's auth popup is blank or won't render | Forgot to check "Authorize using browser" |
 | `redirect_uri_mismatch` from Cognito | Callback URL not in `mcp_oauth_callback_urls` — re-apply after adding it |
 | `invalid_scope` from Cognito's `/oauth2/authorize` | Requested scope isn't in Cognito's `allowed_oauth_scopes` (`mcp_cognito.tf`) — check via the authorize proxy (§4) to see what was actually requested |
-| `invalid_grant` at token exchange | Usually a stale/reused authorization code — restart the flow from "Get New Access Token". If the code/verifier/redirect_uri all check out via the logs, also check whether the client is sending a `resource` param (RFC 8707) alongside PKCE — Cognito rejected exactly that combination for the ChatGPT connector; see `docs/chatgpt-oauth-notes.md`. Both proxy routes now drop `resource` before forwarding, so this shouldn't recur, but a new client sending some other param Cognito doesn't expect could hit the same failure mode |
+| `invalid_grant` at token exchange | Usually a stale/reused authorization code — restart the flow from "Get New Access Token". If the code/verifier/redirect_uri all check out via the logs, also check whether the client is sending a `resource` param (RFC 8707) — Cognito rejects it unless a matching `aws_cognito_resource_server` is registered (`mcp_cognito.tf` already registers one for this server's own URL); a client sending some other param Cognito doesn't expect can hit the same failure mode, fixable by adding it to `var.mcp_strip_oauth_params`. See `docs/chatgpt-oauth-notes.md` |
 | `invalid_request` at token exchange, and `Token proxy request \| body=...` in CloudWatch looks like an unredacted blob instead of a redacted form string | API Gateway base64-encoded the body and it wasn't decoded before forwarding to Cognito — fixed by `_decode_body()` in `handler.py`; make sure the deployed Lambda is current (re-run `terraform apply`) |
 | 401 from `/mcp` with a valid-looking token | Token's `client_id` claim doesn't match the API Gateway JWT authorizer's configured `audience` — see `docs/design-notes.md` §3.1 |
 | `invalid_request` from a manually-built `curl` token exchange, even though every field looks right | `curl -d` does **not** URL-encode values — it sends `redirect_uri`/`resource` with a literal `://` in the body. Use `--data-urlencode "field=value"` per field instead, which matches what real clients and Postman send |

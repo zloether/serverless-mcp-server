@@ -17,12 +17,9 @@ variable "mcp_cognito_domain_prefix" {
 }
 
 variable "mcp_oauth_callback_urls" {
-  description = "OAuth redirect URIs allowed to complete the Cognito Hosted UI login flow. Defaults to Claude.ai's and Claude.com's MCP connector callbacks — override with -var if connecting a different AI tool with custom MCP server support."
+  description = "Additional OAuth redirect URIs to allow alongside Claude.ai's and Claude.com's default MCP connector callbacks (see locals.mcp_default_oauth_callback_urls in mcp_cognito.tf) — set via dev.auto.tfvars to connect another AI tool (e.g. ChatGPT, Postman) without losing Claude's callbacks."
   type        = list(string)
-  default = [
-    "https://claude.ai/api/mcp/auth_callback",
-    "https://claude.com/api/mcp/auth_callback",
-  ]
+  default     = []
 }
 
 variable "mcp_lambda_reserved_concurrency" {
@@ -35,4 +32,10 @@ variable "mcp_verbose_oauth_logging" {
   description = "When true, the OAuth proxy routes (/oauth2/authorize, /oauth2/token) log full request/response headers to CloudWatch in addition to the redacted bodies they always log. Off by default — headers are noisy and rarely needed once a flow is known-working; turn on temporarily while debugging a connector issue. See docs/DEBUGGING.md."
   type        = bool
   default     = false
+}
+
+variable "mcp_strip_oauth_params" {
+  description = "OAuth query/body param names for the /oauth2/authorize and /oauth2/token proxy routes to drop before forwarding to Cognito. Empty by default — Cognito has a resource server registered (mcp_cognito.tf) and accepts standard params, including RFC 8707's `resource`, natively via resource binding, so nothing needs stripping out of the box. Set to e.g. [\"resource\"] to drop specific params again if a differently-configured pool rejects something a client sends. See docs/chatgpt-oauth-notes.md."
+  type        = list(string)
+  default     = []
 }
