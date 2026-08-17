@@ -4,13 +4,16 @@
 # Python
 __pycache__/
 *.pyc
-uv.lock
 .venv/
 
 # Coverage.py run data
 .coverage
 .coverage.*
 htmlcov/
+
+# Test/lint caches
+.pytest_cache/
+.ruff_cache/
 
 # Lambda build artifacts
 build/

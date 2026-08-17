@@ -16,14 +16,19 @@ MONTHLY_LIMIT = int(os.environ["MONTHLY_LIMIT"])
 dynamodb = boto3.resource("dynamodb")
 usage_table = dynamodb.Table(USAGE_TABLE_NAME)
 
+# Items are cheap enough to keep forever, but expiring them via the table's
+# ttl attribute (terraform/mcp_server.tf) matches the same "bounded by
+# default" principle applied to log retention.
+_TTL_SECONDS = 90 * 24 * 60 * 60
+
 
 def _increment_and_check(counter_id: str, limit: int) -> bool:
     # Returns True if the counter is still within limit after incrementing.
     response = usage_table.update_item(
         Key={"counter_id": counter_id},
-        UpdateExpression="ADD #c :one",
+        UpdateExpression="ADD #c :one SET expires_at = :expires_at",
         ExpressionAttributeNames={"#c": "count"},
-        ExpressionAttributeValues={":one": 1},
+        ExpressionAttributeValues={":one": 1, ":expires_at": int(time.time()) + _TTL_SECONDS},
         ReturnValues="UPDATED_NEW",
     )
     count = int(response["Attributes"]["count"])

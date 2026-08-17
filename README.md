@@ -66,6 +66,16 @@ for the full explanation of how ChatGPT's connector does OAuth and why.
 - Python 3.13, for running the test suite locally
 - An S3 bucket for Terraform state (create one first — see below)
 
+## Running tests locally
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements-dev.txt
+pytest
+ruff check .
+```
+
 ## Setup
 
 1. **Create the state bucket** and fill in its name in `terraform/backend.tf`
@@ -97,7 +107,8 @@ for the full explanation of how ChatGPT's connector does OAuth and why.
    ```bash
    aws cognito-idp admin-create-user \
      --user-pool-id "$(terraform output -raw mcp_cognito_user_pool_id)" \
-     --username you@example.com
+     --username you@example.com \
+     --desired-delivery-mediums EMAIL
    ```
 
    Cognito emails a temporary password to that address (via its built-in
@@ -143,6 +154,12 @@ here should stay inside AWS's always-free tier:
 | DynamoDB (on-demand) | $0 — inside the always-free 25GB / 25 WCU-RCU tier |
 | CloudWatch | Low cents |
 | **Total** | **~$0–2/month** |
+
+The $0–2/month figure assumes normal use. The five unauthenticated OAuth
+routes (discovery, protected-resource metadata, authorize, token, JWKS) have
+no authorizer in front of them, so they're bounded only by the API Gateway
+per-route throttle, not by actual traffic — this is exactly why the AWS
+Budget below matters.
 
 This template's rate-limiting layers (API Gateway throttle, Lambda
 concurrency cap, DynamoDB usage counter) exist specifically to keep it there
@@ -243,13 +260,3 @@ Apache 2.0 with the [Commons Clause](https://commonsclause.com/) (see
 commercial purposes — but you can't sell the software itself or offer it
 (or a service substantially derived from it) to third parties for a fee,
 e.g. hosting this as a paid product.
-
-## Running tests locally
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements-dev.txt
-pytest
-ruff check .
-```

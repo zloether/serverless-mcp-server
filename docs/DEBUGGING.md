@@ -11,8 +11,9 @@ Lambda return at each step, independent of any client quirks.
 Postman's OAuth 2.0 helper redirects to `https://oauth.pstmn.io/v1/callback`.
 Claude.ai's and Claude.com's callback URLs are always allowed
 (`locals.mcp_default_oauth_callback_urls` in `mcp_cognito.tf`), so
-`mcp_oauth_callback_urls` only needs Postman's added on top, then
-`terraform apply`:
+`mcp_oauth_callback_urls` only needs Postman's added on top. Add this to
+`terraform/dev.auto.tfvars` (gitignored — see `AGENTS.md`'s Conventions
+section), then `terraform apply`:
 
 ```hcl
 mcp_oauth_callback_urls = [

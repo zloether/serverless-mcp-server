@@ -8,7 +8,7 @@ MCP server template that Claude.ai or ChatGPT (tested) — or in principle any M
 
 ## Adding a real tool
 
-1. Add a module under `src/tools/` with `NAME`, `DESCRIPTION`, `INPUT_SCHEMA`, and a `call(arguments, context)` function — same shape as `tools/hello_world.py`.
+1. Add a module under `src/tools/` with `NAME`, `DESCRIPTION`, `INPUT_SCHEMA`, and a `call(arguments, context)` function — same shape as `tools/hello_world.py`. `INPUT_SCHEMA` is advertised to clients via `tools/list` but not enforced by `handler.py` — `arguments` reaches `call()` unvalidated, so validate it yourself if your tool needs more than `hello_world`'s no-args case.
 2. Register it in `src/tools/__init__.py`'s `TOOLS` dict.
 3. If the tool calls a slow upstream API, raise `aws_lambda_function.mcp_server`'s `timeout` in `terraform/mcp_server.tf` (capped at 30s — API Gateway's HTTP API integration timeout ceiling) and check `context.get_remaining_time_in_millis()` before starting work that might not finish in time.
 4. If the tool needs a secret (API key, etc.), read it from SSM Parameter Store (SecureString) rather than baking it into an environment variable, and scope the Lambda role to `ssm:GetParameter` on that one parameter path.

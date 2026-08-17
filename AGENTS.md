@@ -15,7 +15,7 @@ See `docs/design-notes.md` for the architecture and the reasoning behind each de
 │   ├── main.tf             # Shared/ungrouped resource definitions (intentionally sparse)
 │   ├── mcp_cognito.tf      # Cognito user pool, Hosted UI, app client (OAuth for the MCP connector)
 │   ├── mcp_server.tf       # MCP server: API Gateway, Lambda, rate-limit Layers 1-3, usage-counter table
-│   └── outputs.tf          # Outputs — Cognito Hosted UI URL, client ID/secret, MCP server URL
+│   └── outputs.tf          # Outputs — Cognito Hosted UI URL, client ID/secret, MCP server URL, plus Postman/debugging URLs (discovery, protected-resource, authorize, token, JWKS)
 ├── lambdas/
 │   └── hello-mcp/          # The MCP server Lambda
 │       ├── src/
@@ -31,10 +31,14 @@ See `docs/design-notes.md` for the architecture and the reasoning behind each de
 │   .windsurfrules,         # Keep them in sync if this file is renamed/moved.
 │   .cursor/rules/agents.mdc,
 │   .github/copilot-instructions.md
+├── .github/                # CI workflow (ruff + pytest) and Dependabot config
 ├── docs/
 │   ├── design-notes.md     # Why this architecture, Claude.ai connector requirements, rate-limiting design
 │   ├── DEBUGGING.md        # Testing the OAuth + MCP chain directly with Postman/curl
 │   └── chatgpt-oauth-notes.md  # How ChatGPT's connector does OAuth and what this template does to support it
+├── LICENSE                 # Apache 2.0 + Commons Clause
+├── pyproject.toml          # ruff config
+├── requirements-dev.txt    # boto3, pytest, ruff
 └── README.md               # Human-facing setup/deploy guide
 ```
 
@@ -89,9 +93,9 @@ Do not add `repo` or `project` to individual resource `tags` blocks unless overr
 
 ## IAM
 
-- Use inline `aws_iam_role_policy` with `jsonencode()` — not separate `aws_iam_policy` data sources.
-- Scope permissions to specific resource ARNs. Use `"*"` only where AWS does not support resource-level conditions (e.g. `logs:*`).
-- Every Lambda role includes a CloudWatch Logs statement: actions `["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]`, resource `"arn:aws:logs:*:*:*"`.
+- Use inline `aws_iam_role_policy` with policy JSON built from a `data "aws_iam_policy_document"` — not a separate `aws_iam_policy` resource.
+- Scope permissions to specific resource ARNs. Use `"*"` only where AWS does not support resource-level conditions.
+- Every Lambda role includes a CloudWatch Logs statement: actions `["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]`, resource scoped to that function's own log group ARN plus a trailing `:*` for the log-stream level (e.g. `"${aws_cloudwatch_log_group.mcp_server_lambda.arn}:*"`), not a wildcard.
 
 ## Conventions
 

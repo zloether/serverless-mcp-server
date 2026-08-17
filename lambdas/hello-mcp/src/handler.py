@@ -38,6 +38,7 @@ API_BASE_URL = os.environ["API_BASE_URL"]
 VERBOSE_OAUTH_LOGGING = os.environ.get("VERBOSE_OAUTH_LOGGING", "").lower() == "true"
 
 MCP_PROTOCOL_VERSION = "2025-06-18"
+SUPPORTED_PROTOCOL_VERSIONS = {MCP_PROTOCOL_VERSION}
 
 
 def _decode_body(event) -> str:
@@ -64,11 +65,19 @@ def _jsonrpc_error(req_id, code, message):
 # MCP JSON-RPC methods
 # ---------------------------------------------------------------------------
 def _handle_initialize(req_id, params, context):
-    client_version = (params or {}).get("protocolVersion", MCP_PROTOCOL_VERSION)
+    if params is not None and not isinstance(params, dict):
+        return _jsonrpc_error(req_id, -32602, "Invalid params")
+
+    client_version = (params or {}).get("protocolVersion")
+    negotiated_version = (
+        client_version
+        if isinstance(client_version, str) and client_version in SUPPORTED_PROTOCOL_VERSIONS
+        else MCP_PROTOCOL_VERSION
+    )
     return _jsonrpc_result(
         req_id,
         {
-            "protocolVersion": client_version,
+            "protocolVersion": negotiated_version,
             "capabilities": {"tools": {}},
             "serverInfo": {"name": "serverless-mcp-server", "version": "0.1.0"},
         },
@@ -88,7 +97,12 @@ def _handle_tools_list(req_id, params, context):
 
 
 def _handle_tools_call(req_id, params, context):
+    if params is not None and not isinstance(params, dict):
+        return _jsonrpc_error(req_id, -32602, "Invalid params")
+
     name = (params or {}).get("name")
+    if not isinstance(name, str):
+        return _jsonrpc_error(req_id, -32602, "Invalid params")
     tool = TOOLS.get(name)
 
     if tool is None:
@@ -97,11 +111,15 @@ def _handle_tools_call(req_id, params, context):
             req_id, {"content": [{"type": "text", "text": f"unknown tool: {name}"}], "isError": True}
         )
 
+    arguments = (params or {}).get("arguments")
+    if arguments is not None and not isinstance(arguments, dict):
+        return _jsonrpc_error(req_id, -32602, "Invalid params")
+    arguments = arguments or {}
+
     if usage_cap_reached():
         logger.warning("tools/call short-circuited by usage cap | id=%s name=%s", req_id, name)
         return _jsonrpc_result(req_id, {"content": [{"type": "text", "text": "usage cap reached"}], "isError": True})
 
-    arguments = (params or {}).get("arguments") or {}
     result = tool.call(arguments, context)
     return _jsonrpc_result(req_id, result)
 
@@ -119,6 +137,10 @@ def _handle_mcp_request(body: str, context):
     except json.JSONDecodeError as e:
         logger.error("Failed to parse JSON-RPC body | error=%s", e)
         return _json_response(400, _jsonrpc_error(None, -32700, "Parse error"))
+
+    if not isinstance(payload, dict):
+        logger.error("JSON-RPC payload is not an object | payload=%s", payload)
+        return _json_response(400, _jsonrpc_error(None, -32600, "Invalid Request"))
 
     # A JSON-RPC message with no "id" key is a notification — per spec it
     # must never receive a response, even an error one.
@@ -218,7 +240,7 @@ def _parse_param_list(value: str) -> tuple:
 _DROPPED_OAUTH_PARAMS = _parse_param_list(os.environ.get("STRIP_OAUTH_PARAMS", ""))
 
 _REDACTED = "***REDACTED***"
-_REDACTED_HEADERS = ("authorization",)
+_REDACTED_HEADERS = ("authorization", "cookie", "set-cookie")
 
 
 def _headers_for_log(headers: dict) -> str:
@@ -311,6 +333,17 @@ def _proxy_to_cognito(url: str, method: str, body: bytes | None, headers: dict):
         return 502, error_body, "application/json", {}
 
 
+# RFC 6749 §5.1 requires token responses to disable caching; Cognito already
+# sends these, so forward them through instead of dropping them when the
+# response is rebuilt below.
+_FORWARDED_RESPONSE_HEADERS = ("Cache-Control", "Pragma")
+
+
+def _forwarded_response_headers(resp_headers: dict) -> dict:
+    lowered = {k.lower(): v for k, v in resp_headers.items()}
+    return {name: lowered[name.lower()] for name in _FORWARDED_RESPONSE_HEADERS if name.lower() in lowered}
+
+
 def _log_token_hop(label: str, headers: dict, redacted_body: str, **fields):
     prefix = " ".join(f"{k}={v}" for k, v in fields.items())
     logger.info(
@@ -346,7 +379,11 @@ def _handle_token_proxy(event):
     resp_text = resp_body.decode()
     _log_token_hop("inbound from Cognito", resp_headers, _redact_token_response(resp_text), status=status)
 
-    response = {"statusCode": status, "headers": {"Content-Type": content_type}, "body": resp_text}
+    response = {
+        "statusCode": status,
+        "headers": {"Content-Type": content_type, **_forwarded_response_headers(resp_headers)},
+        "body": resp_text,
+    }
     _log_token_hop(
         "outbound to API Gateway",
         response["headers"],
@@ -389,6 +426,10 @@ def _caller_identity(event) -> str:
     # Populated by the API Gateway JWT authorizer on /mcp; absent on the
     # unauthenticated discovery route.
     claims = event.get("requestContext", {}).get("authorizer", {}).get("jwt", {}).get("claims", {})
+    # `email` never fires today: username_attributes = ["email"] (mcp_cognito.tf)
+    # makes Cognito generate a UUID username, and access tokens don't carry the
+    # `email` claim (that's ID-token-only) — kept here for a future custom-claim
+    # setup that isn't wired up yet.
     return claims.get("email") or claims.get("username") or claims.get("sub") or "unknown"
 
 
