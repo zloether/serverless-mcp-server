@@ -198,6 +198,17 @@ def test_notification_for_unhandled_method_gets_no_body():
     table.update_item.assert_not_called()
 
 
+def test_notification_for_known_method_gets_no_body():
+    table = _usage_table_mock()
+    with patch.object(usage_cap, "usage_table", table):
+        result = mcp_server.handler(
+            _mcp_event({"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "hello_world"}}), None
+        )
+    assert result["statusCode"] == 202
+    assert result["body"] == ""
+    table.update_item.assert_not_called()
+
+
 def test_request_with_id_for_unknown_method_returns_jsonrpc_error():
     result = _call_mcp({"jsonrpc": "2.0", "id": 7, "method": "bogus/method"})
     assert result["statusCode"] == 200

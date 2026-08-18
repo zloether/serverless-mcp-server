@@ -149,11 +149,12 @@ def _handle_mcp_request(body: str, context):
     method = payload.get("method")
     params = payload.get("params")
 
+    if is_notification:
+        logger.info("Ignoring notification | method=%s", method)
+        return _empty_response()
+
     handler_fn = METHODS.get(method)
     if handler_fn is None:
-        if is_notification:
-            logger.info("Ignoring notification for unhandled method | method=%s", method)
-            return _empty_response()
         logger.error("Unknown MCP method | method=%s", method)
         return _json_response(200, _jsonrpc_error(req_id, -32601, "Method not found"))
 
