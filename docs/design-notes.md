@@ -53,8 +53,12 @@ Claude.ai (web/mobile)
    │  MCP JSON-RPC over HTTPS (Streamable HTTP)
    ▼
 API Gateway (HTTP API)  ── JWT authorizer (validates Cognito token)
-   │  ANY /mcp → Lambda proxy integration
-   │  GET /.well-known/oauth-authorization-server → static discovery JSON
+   │  ANY /mcp → Lambda proxy integration (authorized)
+   │  GET /.well-known/oauth-authorization-server  → discovery JSON        (public)
+   │  GET /.well-known/oauth-protected-resource     → protected-resource JSON (public)
+   │  GET /oauth2/authorize                         → proxies to Cognito     (public)
+   │  POST /oauth2/token                            → proxies to Cognito     (public)
+   │  GET /.well-known/jwks.json                    → proxies to Cognito     (public)
    ▼
 Lambda (Python) — MCP server (hand-rolled JSON-RPC: initialize / tools/list / tools/call)
    │
@@ -76,9 +80,12 @@ in `handler.py`.
   handful of users.
 - One **confidential** App Client (has a secret), Authorization Code grant.
   Callback URLs: Claude.ai's and Claude.com's OAuth redirect URIs.
-- Paste the App Client ID/secret and the Hosted UI's `/oauth2/authorize` and
-  `/oauth2/token` URLs into Claude.ai's connector setup, in Advanced
-  settings.
+- Paste only the App Client ID/secret and the MCP server URL into Claude.ai's
+  connector setup, in Advanced settings. Claude.ai discovers the
+  `/oauth2/authorize` and `/oauth2/token` endpoints itself via RFC 8414/9728
+  discovery — and those endpoints resolve to this server's own proxy routes
+  (§3.2), not Cognito's Hosted UI directly. Pasting Cognito's Hosted UI URLs
+  by hand would bypass that proxy layer entirely.
 - **Known gotcha, already solved in `terraform/mcp_server.tf`:** Cognito
   access tokens carry an `aud` claim only when the client sent a `resource`
   param (RFC 8707) at `/oauth2/authorize` — otherwise there's no `aud` at
@@ -96,6 +103,13 @@ in `handler.py`.
     issuer   = "https://cognito-idp.${var.aws_region}.amazonaws.com/${aws_cognito_user_pool.mcp_server.id}"
   }
   ```
+
+- **Known gotcha, not fixed (near-zero real-world impact):** API Gateway's
+  native JWT authorizer doesn't check `token_use`, so a Cognito **ID token**
+  — which also carries `aud = <client_id>` — authenticates identically to an
+  **access token**. Same user pool either way, so this doesn't grant access
+  to anything an access token couldn't already reach; worth knowing if you're
+  auditing what a captured token can do.
 
 - MFA is enforced (`mfa_configuration = "ON"`): TOTP and passkeys/WebAuthn
   both available. Passkey enrollment only shows up in Cognito's newer
@@ -161,8 +175,12 @@ up over a month. This template covers both, plus a note on the unknown.
 Route-level throttle on `ANY /mcp`: steady-state **2 req/s, burst 5**
 (`terraform/mcp_server.tf`). Cheap, config-only, independent of anything the
 Lambda code does. Bounds worst-case request rate regardless of caller
-behavior. The same throttle is applied to the unauthenticated discovery
-route, since it has no auth in front of it.
+behavior. A tighter throttle — **1 req/s, burst 2** — is applied to the five
+unauthenticated routes (discovery, protected-resource metadata, authorize,
+token, JWKS), since they have no auth in front of them and each does real
+work (a Lambda invocation, and for the token/JWKS routes an outbound call to
+Cognito) per request. Route throttles are global, not per-caller, so this is
+config-only DoS resistance, not authentication.
 
 **Layer 2 — Lambda reserved concurrency (parallelism cap)**
 `var.mcp_lambda_reserved_concurrency` caps concurrent executions on the MCP
@@ -176,7 +194,7 @@ for requesting a quota increase and setting a real reservation (e.g. `2`)
 once it's approved.
 
 **Layer 3 — Application-level cumulative cap (the actual kill switch)**
-A DynamoDB counter table (`usage-counters`, PK `counter_id`), with one item
+A DynamoDB counter table (`serverless-mcp-usage-counters`, PK `counter_id`), with one item
 per day (`date#YYYY-MM-DD`) and one per month (`month#YYYY-MM`), atomically
 incremented (`UpdateItem` + `ADD`) on every tool invocation (`usage_cap.py`).
 Before doing any real work, the Lambda
@@ -184,8 +202,8 @@ checks the counter; if the threshold is exceeded it short-circuits and
 returns an MCP error ("usage cap reached") instead of proceeding.
 
 - Defaults in this template: **200/day, 2,000/month** — adjust
-  `DAILY_LIMIT`/`MONTHLY_LIMIT` in `terraform/mcp_server.tf` to your
-  expected usage.
+  `var.mcp_daily_limit`/`var.mcp_monthly_limit` (`terraform/variables.tf`) to
+  your expected usage.
 - Enforced in code, so it doesn't depend on AWS billing data (which can lag
   hours) — it's the fastest-acting layer.
 - Breaches fail silently otherwise (caller just gets an MCP error) — wire a
@@ -214,18 +232,19 @@ cost spike from something the request-based counters didn't anticipate
 the API Gateway stage.
 
 **Layer 7 — WAF rate-based rule (optional, real cost tradeoff)**
-An unauthenticated request still costs a fraction of a cent at API Gateway
-before the Cognito authorizer rejects it. AWS WAF in front of the HTTP API,
-one rate-based rule blocking any single IP over ~100 requests/5 min, closes
-that gap — but adds a flat ~$5–8/month base cost, large relative to the
-rest of this stack. Skip initially; revisit only if the discovery
-endpoint's logs show unexpected unauthenticated traffic.
+The five public routes (§3.2) have no authorizer at all — a request to them
+runs the Lambda to completion (and for the token/JWKS routes, calls Cognito)
+at a fraction of a cent, bounded only by Layer 1's per-route throttle above.
+AWS WAF in front of the HTTP API, one rate-based rule blocking any single IP
+over ~100 requests/5 min, adds real per-caller enforcement — but adds a flat
+~$5–8/month base cost, large relative to the rest of this stack. Skip
+initially; revisit only if the public routes' logs show unexpected traffic.
 
 **Summary**
 
 | Layer | Mechanism | Default limit | Response to breach | Included here? |
 |---|---|---|---|---|
-| Rate | API Gateway route throttle | 2 req/s, burst 5 | 429, request dropped | Yes |
+| Rate | API Gateway route throttle | 2 req/s burst 5 (`/mcp`); 1 req/s burst 2 (5 public routes) | 429, request dropped | Yes |
 | Concurrency | Lambda reserved concurrency | None by default (`-1`); set after quota increase | 429, request throttled | Yes |
 | Cumulative (app-wide) | DynamoDB counter, checked pre-execution | 200/day, 2,000/month | MCP error, no downstream calls made | Yes |
 | Cumulative (per-provider) | DynamoDB counter, checked pre-provider-call | 50/day per paid provider | MCP error for that tool only | No — add when you add a paid tool |
@@ -246,15 +265,23 @@ CloudWatch Logs retention is capped at 14 days in this template (`retention_in_d
 | CloudWatch | Low cents |
 | **Total** | **~$0–2/month** |
 
+The $0–2/month figure assumes normal use. The five unauthenticated OAuth
+routes above have no authorizer, so they're bounded only by the API Gateway
+per-route throttle (Layer 1), not by actual traffic — set the AWS Budget in
+Layer 6 as a backstop.
+
 ---
 
 ## 4. Build order (recommended for anyone forking this template)
 
-1. **Cognito first, standalone.** `terraform apply` just `mcp_cognito.tf`'s
-   resources (comment out or remove `mcp_server.tf` temporarily if you want
-   to isolate it). Verify login manually in a browser (hit the Hosted UI
-   URL, log in, confirm a token comes back) before touching the Lambda.
-2. **Full apply with the `hello_world` stub**, which is what this template
+1. **Full apply, verify Cognito before touching the connector.** Cognito's
+   resource server (`mcp_cognito.tf`) depends on the API Gateway declared in
+   `mcp_server.tf` (its `identifier` references
+   `aws_apigatewayv2_api.mcp_server.api_endpoint`), so the two can no longer
+   be applied independently — `terraform apply` the whole module. Then verify
+   login manually in a browser (hit the Hosted UI URL, log in, confirm a
+   token comes back) before connecting a real MCP client.
+2. **Confirm the `hello_world` stub end to end**, which is what this template
    ships with Layers 1–3 already active. Connect as a real Claude.ai custom
    connector and confirm the *entire chain* — discovery → OAuth login →
    token → `hello_world` tool call → usage counter increments — works end

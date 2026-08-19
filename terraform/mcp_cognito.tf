@@ -2,10 +2,12 @@
 # Cognito — auth for the MCP server
 # (see docs/design-notes.md §3.1 / build order step 1)
 #
-# Standalone on purpose: no Lambda or API Gateway wiring here yet. Verify the
-# Hosted UI login manually and inspect a real access token (see the design
-# notes' gotcha about the missing `aud` claim) before building anything on
-# top.
+# Not standalone: the resource server below depends on the API Gateway
+# declared in mcp_server.tf (its `identifier` references
+# aws_apigatewayv2_api.mcp_server.api_endpoint), so this file can't be
+# applied in isolation. Verify the Hosted UI login manually and inspect a
+# real access token (see the design notes' gotcha about the missing `aud`
+# claim) after a full apply, before connecting a real MCP client.
 # ---------------------------------------------------------------------------
 
 resource "aws_cognito_user_pool" "mcp_server" {
@@ -77,6 +79,12 @@ resource "aws_cognito_user_pool_client" "mcp_server" {
   supported_identity_providers         = ["COGNITO"]
 
   callback_urls = local.mcp_oauth_callback_urls
+
+  # Only the authorization-code flow (above) and refresh-token exchange are
+  # used. Without this, Cognito's default auth flows also allow direct SRP
+  # auth against this client — still MFA-gated (pool-level MFA is required
+  # below), but a second credential-exchange path this client doesn't need.
+  explicit_auth_flows = ["ALLOW_REFRESH_TOKEN_AUTH"]
 
   prevent_user_existence_errors = "ENABLED"
 

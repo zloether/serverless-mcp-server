@@ -1,6 +1,9 @@
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
+[tool.coverage.run]
+source = ["lambdas/hello-mcp/src"]
+
 [tool.ruff]
 line-length = 120
 exclude = ["build/"]

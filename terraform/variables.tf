@@ -39,3 +39,15 @@ variable "mcp_strip_oauth_params" {
   type        = list(string)
   default     = []
 }
+
+variable "mcp_daily_limit" {
+  description = "Layer 3 (design-notes.md §3.4) cumulative usage cap — max tool calls per UTC day before the Lambda short-circuits with an MCP error instead of doing real work."
+  type        = number
+  default     = 200
+}
+
+variable "mcp_monthly_limit" {
+  description = "Layer 3 (design-notes.md §3.4) cumulative usage cap — max tool calls per UTC month before the Lambda short-circuits with an MCP error instead of doing real work."
+  type        = number
+  default     = 2000
+}

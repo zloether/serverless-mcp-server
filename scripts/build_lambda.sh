@@ -13,6 +13,7 @@ SRC_DIR="${LAMBDA_DIR}/src"
 BUILD_DIR="${REPO_ROOT}/build/${LAMBDA_NAME}"
 REQUIREMENTS="${LAMBDA_DIR}/requirements.txt"
 
+rm -rf "$BUILD_DIR"
 mkdir -p "$SRC_DIR" "$BUILD_DIR"
 
 cp -r "${SRC_DIR}/." "$BUILD_DIR/"

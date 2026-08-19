@@ -3,6 +3,7 @@ import importlib.util
 import json
 import os
 import sys
+import time
 import urllib.error
 from unittest.mock import MagicMock, patch
 
@@ -65,11 +66,36 @@ def test_initialize_returns_capabilities_and_server_info():
     assert body["result"]["capabilities"] == {"tools": {}}
 
 
-def test_initialize_echoes_client_protocol_version():
+def test_initialize_rejects_unsupported_protocol_version_with_server_default():
     result = _call_mcp(
         {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2024-01-01"}}
     )
-    assert _body(result)["result"]["protocolVersion"] == "2024-01-01"
+    assert _body(result)["result"]["protocolVersion"] == mcp_server.MCP_PROTOCOL_VERSION
+
+
+def test_initialize_echoes_supported_protocol_version():
+    result = _call_mcp(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {"protocolVersion": mcp_server.MCP_PROTOCOL_VERSION},
+        }
+    )
+    assert _body(result)["result"]["protocolVersion"] == mcp_server.MCP_PROTOCOL_VERSION
+
+
+def test_initialize_with_string_params_returns_invalid_params():
+    result = _call_mcp({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": "str"})
+    body = _body(result)
+    assert body["error"]["code"] == -32602
+
+
+def test_initialize_with_list_protocol_version_returns_server_default():
+    result = _call_mcp(
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": [1, 2]}}
+    )
+    assert _body(result)["result"]["protocolVersion"] == mcp_server.MCP_PROTOCOL_VERSION
 
 
 def test_tools_list_returns_hello_world_tool():
@@ -138,6 +164,15 @@ def test_usage_cap_reached_blocks_hello_world():
     assert body["content"][0]["text"] == "usage cap reached"
 
 
+def test_usage_counter_increment_sets_expires_at_ttl():
+    table = _usage_table_mock()
+    with patch.object(usage_cap, "usage_table", table):
+        usage_cap._increment_and_check("date#2026-01-01", 200)
+    kwargs = table.update_item.call_args.kwargs
+    assert "SET expires_at" in kwargs["UpdateExpression"]
+    assert kwargs["ExpressionAttributeValues"][":expires_at"] > time.time()
+
+
 def test_daily_cap_reached_short_circuits_monthly_increment():
     table = _usage_table_mock(daily_count=201, monthly_count=1)
     with patch.object(usage_cap, "usage_table", table):
@@ -163,6 +198,17 @@ def test_notification_for_unhandled_method_gets_no_body():
     table.update_item.assert_not_called()
 
 
+def test_notification_for_known_method_gets_no_body():
+    table = _usage_table_mock()
+    with patch.object(usage_cap, "usage_table", table):
+        result = mcp_server.handler(
+            _mcp_event({"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "hello_world"}}), None
+        )
+    assert result["statusCode"] == 202
+    assert result["body"] == ""
+    table.update_item.assert_not_called()
+
+
 def test_request_with_id_for_unknown_method_returns_jsonrpc_error():
     result = _call_mcp({"jsonrpc": "2.0", "id": 7, "method": "bogus/method"})
     assert result["statusCode"] == 200
@@ -181,6 +227,76 @@ def test_malformed_json_returns_400():
     result = mcp_server.handler(event, None)
     assert result["statusCode"] == 400
     assert _body(result)["error"]["code"] == -32700
+
+
+def test_batch_payload_returns_invalid_request():
+    event = _mcp_event(None)
+    event["body"] = "[]"
+    result = mcp_server.handler(event, None)
+    assert result["statusCode"] == 400
+    assert _body(result)["error"]["code"] == -32600
+
+
+def test_string_payload_returns_invalid_request():
+    event = _mcp_event(None)
+    event["body"] = '"hi"'
+    result = mcp_server.handler(event, None)
+    assert result["statusCode"] == 400
+    assert _body(result)["error"]["code"] == -32600
+
+
+def test_number_payload_returns_invalid_request():
+    event = _mcp_event(None)
+    event["body"] = "5"
+    result = mcp_server.handler(event, None)
+    assert result["statusCode"] == 400
+    assert _body(result)["error"]["code"] == -32600
+
+
+def test_null_payload_returns_invalid_request():
+    event = _mcp_event(None)
+    event["body"] = "null"
+    result = mcp_server.handler(event, None)
+    assert result["statusCode"] == 400
+    assert _body(result)["error"]["code"] == -32600
+
+
+def test_tools_call_with_dict_name_returns_invalid_params():
+    result = _call_mcp(
+        {"jsonrpc": "2.0", "id": 9, "method": "tools/call", "params": {"name": {"a": 1}}}
+    )
+    body = _body(result)
+    assert body["error"]["code"] == -32602
+
+
+def test_tools_call_with_list_arguments_returns_invalid_params():
+    result = _call_mcp(
+        {
+            "jsonrpc": "2.0",
+            "id": 10,
+            "method": "tools/call",
+            "params": {"name": "hello_world", "arguments": [1, 2]},
+        }
+    )
+    body = _body(result)
+    assert body["error"]["code"] == -32602
+
+
+def test_tools_call_with_string_params_returns_invalid_params():
+    result = _call_mcp({"jsonrpc": "2.0", "id": 11, "method": "tools/call", "params": "str"})
+    body = _body(result)
+    assert body["error"]["code"] == -32602
+
+
+def test_monthly_cap_reached_blocks_hello_world_while_daily_ok():
+    result = _call_mcp(
+        {"jsonrpc": "2.0", "id": 12, "method": "tools/call", "params": {"name": "hello_world"}},
+        daily_count=1,
+        monthly_count=5001,
+    )
+    body = _body(result)["result"]
+    assert body["isError"] is True
+    assert body["content"][0]["text"] == "usage cap reached"
 
 
 def test_non_post_method_on_mcp_returns_405():
@@ -353,6 +469,20 @@ def test_token_proxy_decodes_base64_body():
     assert sent_body == raw.encode()
 
 
+def test_token_proxy_forwards_cache_control_and_pragma_headers():
+    resp = MagicMock()
+    resp.status = 200
+    resp.read.return_value = b'{"access_token": "at"}'
+    resp.headers = {"Content-Type": "application/json", "Cache-Control": "no-store", "Pragma": "no-cache"}
+    resp.__enter__.return_value = resp
+    resp.__exit__.return_value = False
+    event = _token_event("grant_type=authorization_code&client_id=abc&client_secret=shh&code=xyz")
+    with patch("mcp_server_handler.urllib.request.urlopen", return_value=resp):
+        result = mcp_server.handler(event, None)
+    assert result["headers"]["Cache-Control"] == "no-store"
+    assert result["headers"]["Pragma"] == "no-cache"
+
+
 def test_token_proxy_surfaces_cognito_error_status():
     error = urllib.error.HTTPError("url", 400, "Bad Request", {}, None)
     error.read = MagicMock(return_value=b'{"error": "invalid_grant"}')
@@ -419,6 +549,16 @@ def test_headers_for_log_redacts_authorization_when_verbose():
     with patch.object(mcp_server, "VERBOSE_OAUTH_LOGGING", True):
         logged = mcp_server._headers_for_log({"authorization": "Basic abc123", "content-type": "text/plain"})
     assert "abc123" not in logged
+    assert "text/plain" in logged
+
+
+def test_headers_for_log_redacts_cookie_and_set_cookie_when_verbose():
+    with patch.object(mcp_server, "VERBOSE_OAUTH_LOGGING", True):
+        logged = mcp_server._headers_for_log(
+            {"cookie": "session=secret", "set-cookie": "session=secret2", "content-type": "text/plain"}
+        )
+    assert "secret" not in logged
+    assert "secret2" not in logged
     assert "text/plain" in logged
 
 

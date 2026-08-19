@@ -7,15 +7,36 @@
 # confirmed working end to end.
 # ---------------------------------------------------------------------------
 
+locals {
+  mcp_server_function_name = "serverless-mcp-server"
+}
+
 # Layer 3 — cumulative usage cap counter
 resource "aws_dynamodb_table" "mcp_usage_counters" {
-  name         = "usage-counters"
+  name         = "serverless-mcp-usage-counters"
   billing_mode = "PAY_PER_REQUEST"
   hash_key     = "counter_id"
 
   attribute {
     name = "counter_id"
     type = "S"
+  }
+
+  # Items are cheap enough to keep forever (~377/year), but expiring them
+  # keeps this table honest with the same "bounded by default" principle as
+  # the 14-day log retention below — usage_cap.py writes expires_at.
+  ttl {
+    attribute_name = "expires_at"
+    enabled        = true
+  }
+
+  # A `name` change (ForceNew) with the default destroy-then-create order
+  # leaves a window where the Lambda's USAGE_TABLE_NAME still points at the
+  # just-destroyed table until this apply also updates its env var — every
+  # tools/call 500s in that window. create_before_destroy closes it: the new
+  # table exists (empty) before the Lambda ever points at it.
+  lifecycle {
+    create_before_destroy = true
   }
 }
 
@@ -48,7 +69,12 @@ data "aws_iam_policy_document" "mcp_server_permissions" {
       "logs:CreateLogStream",
       "logs:PutLogEvents",
     ]
-    resources = ["arn:aws:logs:*:*:*"]
+    # Scoped to this function's own log group — CreateLogGroup is
+    # evaluated against the target ARN even before the group exists.
+    # CreateLogStream/PutLogEvents act at the log-stream level, so the
+    # trailing ":*" is required — the log group's arn attribute doesn't
+    # include it on its own.
+    resources = ["${aws_cloudwatch_log_group.mcp_server_lambda.arn}:*"]
   }
 }
 
@@ -69,13 +95,17 @@ data "archive_file" "mcp_server_lambda" {
 }
 
 resource "aws_lambda_function" "mcp_server" {
-  function_name    = "serverless-mcp-server"
+  function_name    = local.mcp_server_function_name
   filename         = data.archive_file.mcp_server_lambda.output_path
   source_code_hash = data.archive_file.mcp_server_lambda.output_base64sha256
   architectures    = ["arm64"]
   handler          = "handler.handler"
   runtime          = "python3.13"
   role             = aws_iam_role.mcp_server_lambda.arn
+  # Log group is created first (see depends_on) so Lambda never auto-vends
+  # its own log group on first invoke, which would conflict with the
+  # Terraform-managed one below.
+  depends_on = [aws_cloudwatch_log_group.mcp_server_lambda]
   # Kept below API Gateway's 30s integration timeout (the hard ceiling for
   # HTTP APIs, not configurable higher) so a slow request gets a clean
   # Lambda timeout instead of racing a gateway 504. Raise this if a real
@@ -91,8 +121,8 @@ resource "aws_lambda_function" "mcp_server" {
   environment {
     variables = {
       USAGE_TABLE_NAME      = aws_dynamodb_table.mcp_usage_counters.name
-      DAILY_LIMIT           = "200"
-      MONTHLY_LIMIT         = "2000"
+      DAILY_LIMIT           = tostring(var.mcp_daily_limit)
+      MONTHLY_LIMIT         = tostring(var.mcp_monthly_limit)
       HOSTED_UI_DOMAIN      = "https://${aws_cognito_user_pool_domain.mcp_server.domain}.auth.${var.aws_region}.amazoncognito.com"
       COGNITO_ISSUER        = "https://cognito-idp.${var.aws_region}.amazonaws.com/${aws_cognito_user_pool.mcp_server.id}"
       MCP_SERVER_URL        = "${aws_apigatewayv2_api.mcp_server.api_endpoint}/mcp"
@@ -104,7 +134,10 @@ resource "aws_lambda_function" "mcp_server" {
 }
 
 resource "aws_cloudwatch_log_group" "mcp_server_lambda" {
-  name              = "/aws/lambda/${aws_lambda_function.mcp_server.function_name}"
+  # Derived from the same local as function_name (not interpolated from
+  # aws_lambda_function.mcp_server) to avoid a dependency cycle with the
+  # depends_on above, while keeping the two names in sync.
+  name              = "/aws/lambda/${local.mcp_server_function_name}"
   retention_in_days = 14
 }
 
@@ -210,42 +243,44 @@ resource "aws_apigatewayv2_stage" "mcp_server_default" {
     throttling_burst_limit = 5
   }
 
-  # Same cap on the unauthenticated discovery route — it has no auth in
+  # Tighter cap on the unauthenticated discovery route — it has no auth in
   # front of it, so without an explicit throttle it falls back to the much
-  # higher account-default limit.
+  # higher account-default limit. No authorizer means this and the other four
+  # public routes below are the only rate-limiting layer protecting them
+  # (see docs/design-notes.md §3.4 Layer 1 and the cost table caveat below).
   route_settings {
     route_key              = aws_apigatewayv2_route.mcp_discovery.route_key
-    throttling_rate_limit  = 2
-    throttling_burst_limit = 5
+    throttling_rate_limit  = 1
+    throttling_burst_limit = 2
   }
 
   # Same cap on the protected resource metadata route — also unauthenticated.
   route_settings {
     route_key              = aws_apigatewayv2_route.mcp_protected_resource.route_key
-    throttling_rate_limit  = 2
-    throttling_burst_limit = 5
+    throttling_rate_limit  = 1
+    throttling_burst_limit = 2
   }
 
   # Same cap on the authorize proxy route — also unauthenticated.
   route_settings {
     route_key              = aws_apigatewayv2_route.mcp_authorize.route_key
-    throttling_rate_limit  = 2
-    throttling_burst_limit = 5
+    throttling_rate_limit  = 1
+    throttling_burst_limit = 2
   }
 
   # Same cap on the token proxy route — also unauthenticated (it authenticates
   # the caller itself via the forwarded request body/headers).
   route_settings {
     route_key              = aws_apigatewayv2_route.mcp_token.route_key
-    throttling_rate_limit  = 2
-    throttling_burst_limit = 5
+    throttling_rate_limit  = 1
+    throttling_burst_limit = 2
   }
 
   # Same cap on the JWKS proxy route — also unauthenticated.
   route_settings {
     route_key              = aws_apigatewayv2_route.mcp_jwks.route_key
-    throttling_rate_limit  = 2
-    throttling_burst_limit = 5
+    throttling_rate_limit  = 1
+    throttling_burst_limit = 2
   }
 
   access_log_settings {

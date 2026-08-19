@@ -4,13 +4,16 @@
 # Python
 __pycache__/
 *.pyc
-uv.lock
 .venv/
 
 # Coverage.py run data
 .coverage
 .coverage.*
 htmlcov/
+
+# Test/lint caches
+.pytest_cache/
+.ruff_cache/
 
 # Lambda build artifacts
 build/
@@ -51,5 +54,8 @@ override.tf.json
 .terraformrc
 terraform.rc
 
-# Claude Code local settings (per-machine, not shared)
+# Claude Code local settings and scratch state (per-machine, not shared)
 .claude/settings.local.json
+.claude/worktrees/
+.claude/.cc-writes/
+terraform/.claude/.cc-writes/
