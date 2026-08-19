@@ -7,6 +7,10 @@
 # confirmed working end to end.
 # ---------------------------------------------------------------------------
 
+locals {
+  mcp_server_function_name = "serverless-mcp-server"
+}
+
 # Layer 3 — cumulative usage cap counter
 resource "aws_dynamodb_table" "mcp_usage_counters" {
   name         = "serverless-mcp-usage-counters"
@@ -91,13 +95,17 @@ data "archive_file" "mcp_server_lambda" {
 }
 
 resource "aws_lambda_function" "mcp_server" {
-  function_name    = "serverless-mcp-server"
+  function_name    = local.mcp_server_function_name
   filename         = data.archive_file.mcp_server_lambda.output_path
   source_code_hash = data.archive_file.mcp_server_lambda.output_base64sha256
   architectures    = ["arm64"]
   handler          = "handler.handler"
   runtime          = "python3.13"
   role             = aws_iam_role.mcp_server_lambda.arn
+  # Log group is created first (see depends_on) so Lambda never auto-vends
+  # its own log group on first invoke, which would conflict with the
+  # Terraform-managed one below.
+  depends_on = [aws_cloudwatch_log_group.mcp_server_lambda]
   # Kept below API Gateway's 30s integration timeout (the hard ceiling for
   # HTTP APIs, not configurable higher) so a slow request gets a clean
   # Lambda timeout instead of racing a gateway 504. Raise this if a real
@@ -126,7 +134,10 @@ resource "aws_lambda_function" "mcp_server" {
 }
 
 resource "aws_cloudwatch_log_group" "mcp_server_lambda" {
-  name              = "/aws/lambda/${aws_lambda_function.mcp_server.function_name}"
+  # Derived from the same local as function_name (not interpolated from
+  # aws_lambda_function.mcp_server) to avoid a dependency cycle with the
+  # depends_on above, while keeping the two names in sync.
+  name              = "/aws/lambda/${local.mcp_server_function_name}"
   retention_in_days = 14
 }
 

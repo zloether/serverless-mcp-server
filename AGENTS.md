@@ -31,7 +31,7 @@ See `docs/design-notes.md` for the architecture and the reasoning behind each de
 │   .windsurfrules,         # Keep them in sync if this file is renamed/moved.
 │   .cursor/rules/agents.mdc,
 │   .github/copilot-instructions.md
-├── .github/                # CI workflow (ruff + pytest) and Dependabot config
+├── .github/                # CI workflow (ruff, pytest+coverage, terraform fmt/validate) and Dependabot config
 ├── docs/
 │   ├── design-notes.md     # Why this architecture, Claude.ai connector requirements, rate-limiting design
 │   ├── DEBUGGING.md        # Testing the OAuth + MCP chain directly with Postman/curl

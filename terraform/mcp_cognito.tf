@@ -82,7 +82,8 @@ resource "aws_cognito_user_pool_client" "mcp_server" {
 
   # Only the authorization-code flow (above) and refresh-token exchange are
   # used. Without this, Cognito's default auth flows also allow direct SRP
-  # auth against this client — a second, non-MFA-gated path to a token.
+  # auth against this client — still MFA-gated (pool-level MFA is required
+  # below), but a second credential-exchange path this client doesn't need.
   explicit_auth_flows = ["ALLOW_REFRESH_TOKEN_AUTH"]
 
   prevent_user_existence_errors = "ENABLED"
