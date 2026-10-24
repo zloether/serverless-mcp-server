@@ -1,4 +1,4 @@
 boto3==1.43.111
 coverage==7.16.2
 pytest==9.1.1
-ruff==0.16.10
+ruff==0.17.1
